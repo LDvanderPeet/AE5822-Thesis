@@ -1,0 +1,29 @@
+
+data:
+  path: "./data/ "
+  image_size: 128
+  total_sublooks: 3
+  target_sublook_idx: 2
+  normalization: "log"
+  batch_size: 16
+
+model:
+  name: "latent_diffusion"
+  latent_dim: 64
+  num_layers: 4
+  hidden_dim: 256
+
+scheduler:
+  beta_schedule: "cosine"
+  time_steps: 1000
+  prediction_type: "epsilon"
+
+training:
+  epochs: 50
+  learning_rate: 0.0002
+  optimizer: "adamw"
+  weight_decay: 0.01
+  save_dir: "./experiments/"
+  device: "cuda"
+
+
