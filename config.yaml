@@ -1,29 +1,44 @@
 
 data:
-  path: "./data/ "
-  image_size: 128
+  root_dir: "/shared/home/lvanderpeet/subaps/sbs"
+
+  train:
+    tensor_dir: "out_tensors_train_x96"
+    csv: "out_tensors_train_x96/train.csv"
+
+  valid:
+    tensor_dir: "out_tensors_valid_x96"
+    csv: "out_tensors_valid_x96/valid.csv"
+
+  normalization:
+    type: "percentile"
+    stats_file: "/shared/home/lvanderpeet/percentiles_sm.npy"
+
+  image_size: 96
   total_sublooks: 3
-  target_sublook_idx: 2
-  normalization: "log"
+  input_sublooks: 2
+  target_sublooks: 1
+
   batch_size: 16
 
-model:
-  name: "latent_diffusion"
-  latent_dim: 64
-  num_layers: 4
-  hidden_dim: 256
+  model:
+    name: "unet"
+    in_channels: 2
+    out_channels: 2
+    base_channels: 64
+    depth: 4
 
-scheduler:
-  beta_schedule: "cosine"
-  time_steps: 1000
-  prediction_type: "epsilon"
+  scheduler:
+    beta_schedule: "cosine"
+    time_steps: 1000
+    prediction_type: "epsilon"
 
-training:
-  epochs: 50
-  learning_rate: 0.0002
-  optimizer: "adamw"
-  weight_decay: 0.01
-  save_dir: "./experiments/"
-  device: "cuda"
+  training:
+    epochs: 50
+    learning_rate: 0.0002
+    optimizer: "adamw"
+    weight_decay: 0.01
+    save_dir: "./experiments/"
+    device: "cuda"
 
 
