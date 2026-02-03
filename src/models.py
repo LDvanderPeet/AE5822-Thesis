@@ -58,7 +58,7 @@ class Up(nn.Module):
 
         x = F.pad(x,
                   [
-                      diff_y // 2,
+                      diff_x // 2,
                       diff_x - diff_x // 2,
                       diff_y // 2,
                       diff_y - diff_y // 2]

@@ -72,7 +72,7 @@ def train():
 
         model.eval()
         val_loss = 0.0
-        with torch.nograd():
+        with torch.no_grad():
             for x, y, _ in val_loader:
                 x, y = x.to(device), y.to(device)
                 outputs = model(x)
