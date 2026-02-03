@@ -141,7 +141,7 @@ def build_datasets_from_config(config_path: str):
         tensor_dir=os.path.join(root, cfg["data"]["valid"]["tensor_dir"]),
         norm_stats=os.path.join(root, cfg["data"]["normalization"]["stats_file"]),
         cfg=cfg["data"]["subaperture_config"],
-        da=True,
+        da=False,
     )
     return train_ds, val_ds
 

@@ -37,6 +37,13 @@ class Down(nn.Module):
 class Up(nn.Module):
     """
     Upscaling block: ConvTranspose + skip connection +DoubleConv
+
+    Parameters
+    ----------
+    in_channels : int
+        Number of input channels.
+    out_channels : int
+        Number of output channels.
     """
     def __init__(self, in_channels, out_channels):
         super().__init__()

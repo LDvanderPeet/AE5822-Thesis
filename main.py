@@ -1,31 +1,26 @@
-# import yaml
 import torch
-import os
+import random
 import numpy as np
+from train import train
 
-print(torch.__version__)
-if torch.cuda.is_available():
-    # is_available() takes no arguments
-    print(f"CUDA is generally available: {torch.cuda.is_available()}")
+def set_seed(seed=12):
+    """
+    Ensures reproducibility with a fixed seed.
+    """
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
-    # To check how many GPUs you have
-    device_count = torch.cuda.device_count()
-    print(f"Number of GPUs found: {device_count}")
+def main():
+    set_seed()
 
-    # To get the name of your A6000 (index 0)
-    print(f"GPU 0 Name: {torch.cuda.get_device_name(0)}")
-else:
-    print("GPU is not available")
+    try:
+        train()
+    except Exception as e:
+        print(f"Training failed with error: {e}")
 
-# def main(config_path="config.yaml"):
-#     with open(config_path, "r") as f:
-#         config = yaml.safe_load(f)
-#
-#     # train_loader, val_loader = get_dataloaders(config)
-#     #
-#     # model = build_sar_model(config)
-#
-#
-#
-# if __name__ == "__main__":
-#     print("Hello, World!")
+if __name__ == "__main__":
+    main()
