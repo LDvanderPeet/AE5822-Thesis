@@ -6,8 +6,8 @@ data:
     tensor_dir: "out_tensors_train_x96"
     csv: "out_tensors_train_x96/train_metadata_x96.csv"
     image_size: 96
-    batch_size: 16
-    num_workers: 4z
+    batch_size: 128
+    num_workers: 8
 
   valid:
     tensor_dir: "out_tensors_valid_x96"
@@ -19,7 +19,7 @@ data:
 
   subaperture_config:
     input_indices: [1,2]
-    target_index: 3
+    output_indices: [3]
 
 model:
   name: "unet"

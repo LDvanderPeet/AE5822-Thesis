@@ -2,6 +2,7 @@ import torch
 import random
 import numpy as np
 from train import train
+import traceback
 
 def set_seed(seed=12):
     """
@@ -21,6 +22,7 @@ def main():
         train()
     except Exception as e:
         print(f"Training failed with error: {e}")
+        traceback.print_exc()
 
 if __name__ == "__main__":
     main()

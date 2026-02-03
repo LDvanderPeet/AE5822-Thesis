@@ -40,7 +40,7 @@ class Dataset(torch.utils.data.Dataset):
         self.da = da
 
         self.input_indices = cfg["input_indices"]
-        self.target_index = cfg["target_index"]
+        self.output_indices = cfg["output_indices"]
 
         pvv, pvh = torch.Tensor(np.load(norm_stats))
         self.m_pair = torch.stack([pvv[0], pvh[0]]).reshape(2, 1, 1)
@@ -102,7 +102,8 @@ class Dataset(torch.utils.data.Dataset):
         x_slices = [self._get_subap_slice(tensor, i) for i in self.input_indices]
         x = torch.cat(x_slices, dim=0)
 
-        y = self._get_subap_slice(tensor, self.target_index)
+        y_slices = [self._get_subap_slice(tensor, i) for i in self.output_indices]
+        y = torch.cat(y_slices, dim=0)
 
         x = self._normalize(x)
         y = self._normalize(y)

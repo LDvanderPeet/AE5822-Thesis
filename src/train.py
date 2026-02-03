@@ -20,15 +20,15 @@ def train():
 
     train_loader = DataLoader(
         train_ds,
-        batch_size=cfg["data"]["batch_size"],
+        batch_size=cfg["data"]["train"]["batch_size"],
         shuffle=True,
-        num_workers=cfg["data"]["num_workers"]
+        num_workers=cfg["data"]["train"]["num_workers"]
     )
     val_loader = DataLoader(
         val_ds,
-        batch_size=cfg["data"]["batch_size"],
+        batch_size=cfg["data"]["train"]["batch_size"],
         shuffle=True,
-        num_workers=cfg["data"]["num_workers"]
+        num_workers=cfg["data"]["train"]["num_workers"]
     )
 
     in_ch = len(cfg["data"]["subaperture_config"]["input_indices"]) * 2
@@ -46,7 +46,7 @@ def train():
         model.parameters(),
         lr=cfg["training"]["learning_rate"],
         weight_decay=cfg["training"]["weight_decay"],
-    ) ## TODO: Change to correct
+    )
 
     epochs = cfg["training"]["epochs"]
 
