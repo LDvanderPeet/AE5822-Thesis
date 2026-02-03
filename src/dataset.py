@@ -9,10 +9,6 @@ from torch.utils.data import Dataset
 from safetensors import safe_open
 
 
-with open("config.yaml", 'r') as f:
-    cfg = yaml.safe_load(f)
-
-
 def tfm_dihedral(x, k):
     """
     Apply dihedral augmentation to all tensors.
@@ -20,16 +16,6 @@ def tfm_dihedral(x, k):
     if k in [1, 3, 4, 7]: x = [_x.flip(-2) for _x in x]
     if k in [2, 4, 5, 7]: x = [_x.flip(-1) for _x in x]
     if k in [3, 5, 6, 7]: x = [_x.transpose(-2, -1) for _x in x]
-    return x
-
-
-def normalize_sar(x, m, M):
-    """
-    Percentile-based normalization.
-    """
-    m = torch.Tensor(m)
-    M = torch.Tensor(M)
-    x = ((x - m) / (M - m))
     return x
 
 
@@ -48,17 +34,45 @@ class Dataset(torch.utils.data.Dataset):
     da : bool, optional
         Whether to apply dihedral augmentation or not (default is False).
         """
-    def __init__(self, csv_path, tensor_dir, norm_stats, da=False):
+    def __init__(self, csv_path, tensor_dir, norm_stats, cfg, da=False):
         self.df = pd.read_csv(csv_path)
         self.tensor_dir = tensor_dir
         self.da = da
 
+        self.input_indices = cfg["input_indices"]
+        self.target_index = cfg["target_index"]
+
         pvv, pvh = torch.Tensor(np.load(norm_stats))
-        self.m = torch.stack([pvv[0], pvh[0]]).reshape(-1, 1, 1)
-        self.M = torch.stack([pvv[1], pvh[1]]).reshape(-1, 1, 1)
+        self.m_pair = torch.stack([pvv[0], pvh[0]]).reshape(2, 1, 1)
+        self.M_pair = torch.stack([pvv[1], pvh[1]]).reshape(2, 1, 1)
 
     def __len__(self):
+        """
+        Returns
+        -------
+        len(df) : int
+            length of dataframe.
+        """
         return len(self.df)
+
+    def _normalize(self, tensor):
+        """
+        Dynamically normalizes a SAR tensor, no matter the channels
+        """
+        n_channels = tensor.shape[0]
+        repeats = n_channels // 2
+
+        m = self.m_pair.repeat(repeats, 1, 1)
+        M = self.M_pair.repeat(repeats, 1, 1)
+
+        return torch.clamp((tensor - m) / (M - m), 0.0, 1.0)
+
+    def _get_subap_slice(self, tensor, index):
+        """
+        Helper to grab the two-channel VV/VH slice for a given subap index.
+        """
+        start = index * 2
+        return tensor[start:start + 2, :, :]
 
     def __getitem__(self, idx):
         """
@@ -71,28 +85,27 @@ class Dataset(torch.utils.data.Dataset):
         meta : dict
             Metadata
         """
-
         row = self.df.iloc[idx]
 
         if "file_path" in row:
-            file_path = row.file_path
+            fname = os.path.basename(row.file_path)
         else:
-            file_path = os.path.join(self.tensor_dir, row.file_name)
+            fname = row.file_name
+
+        file_path = os.path.join(self.tensor_dir, fname)
 
         with safe_open(file_path, framework="pt", device="cpu") as f:
             tensor = f.get_tensor(f.keys()[0])
 
         tensor = torch.nan_to_num(tensor, 0.0)
 
-        n_subaps = (tensor.shape[0] // 2) - 1
-        subap_idx = random.randint(1, n_subaps)
+        x_slices = [self._get_subap_slice(tensor, i) for i in self.input_indices]
+        x = torch.cat(x_slices, dim=0)
 
-        x = tensor[2 * subap_idx:2 * subap_idx + 2]
-        y = tensor[0:2]
+        y = self._get_subap_slice(tensor, self.target_index)
 
-
-        x = torch.clamp(normalize_sar(x, self.m, self.M), 0.0, 1.0)
-        y = torch.clamp(normalize_sar(y, self.m, self.M), 0.0, 1.0)
+        x = self._normalize(x)
+        y = self._normalize(y)
 
         if self.da:
             x, y = tfm_dihedral([x, y], random.randint(0,7))
@@ -119,13 +132,19 @@ def build_datasets_from_config(config_path: str):
         csv_path=os.path.join(root, cfg["data"]["train"]["csv"]),
         tensor_dir=os.path.join(root, cfg["data"]["train"]["tensor_dir"]),
         norm_stats=os.path.join(root, cfg["data"]["normalization"]["stats_file"]),
-        data_augmentation=True,
+        cfg=cfg["data"]["subaperture_config"],
+        da=True,
     )
 
     val_ds = Dataset(
         csv_path=os.path.join(root, cfg["data"]["valid"]["csv"]),
         tensor_dir=os.path.join(root, cfg["data"]["valid"]["tensor_dir"]),
         norm_stats=os.path.join(root, cfg["data"]["normalization"]["stats_file"]),
-        data_augmentation=True,
+        cfg=cfg["data"]["subaperture_config"],
+        da=True,
     )
     return train_ds, val_ds
+
+train_ds, val_ds = build_datasets_from_config("/shared/home/lvanderpeet/AE5822-Thesis/config.yaml")
+x, y, _ = train_ds[0]
+print(x.shape, y.shape)
