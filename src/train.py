@@ -4,12 +4,16 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+from diff_utils import visualize_reconstruction, setup_run_directory
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from dataset import build_datasets_from_config
 from models import UNet
 
 def train():
     config_path = "/shared/home/lvanderpeet/AE5822-Thesis/config.yaml"
+
+    run_dir, viz_dir = setup_run_directory(config_path)
     with open(config_path, "r") as f:
         cfg = yaml.safe_load(f)
 
@@ -48,6 +52,16 @@ def train():
         weight_decay=cfg["training"]["weight_decay"],
     )
 
+    scheduler = ReduceLROnPlateau(
+        optimizer,
+        mode='min',
+        factor=cfg["training"]["scheduler"]["factor"],
+        patience=cfg["training"]["scheduler"]["patience"],
+        min_lr=cfg["training"]["scheduler"]["min_lr"]
+    )
+
+    best_val_loss = float('inf')
+
     epochs = cfg["training"]["epochs"]
 
     for epoch in range(epochs):
@@ -55,7 +69,7 @@ def train():
         train_loss = 0.0
 
         loop = tqdm(train_loader, desc=f"Epoch[{epoch+1}/{epochs}]")
-        for x, y, _ in loop:
+        for i, (x, y, _) in enumerate(loop):
             x, y = x.to(device), y.to(device)
 
             ## ---- Forward Pass ---- ##
@@ -72,8 +86,9 @@ def train():
 
         model.eval()
         val_loss = 0.0
+        val_loop = tqdm(val_loader, desc="Validating")
         with torch.no_grad():
-            for x, y, _ in val_loader:
+            for i, (x, y, _) in enumerate(val_loop):
                 x, y = x.to(device), y.to(device)
                 outputs = model(x)
                 loss = criterion(outputs, y)
@@ -82,10 +97,24 @@ def train():
         avg_train_loss = train_loss / len(train_loader)
         avg_val_loss = val_loss / len(val_loader)
 
+        scheduler.step(avg_val_loss)
+        current_lr = optimizer.param_groups[0]["lr"]
+
         print(f"Epoch {epoch+1} Summary: Train Loss: {avg_train_loss:.4f}, Validation Loss: {avg_val_loss:.4f}")
 
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+            best_path = os.path.join(run_dir, "unet_best_model.pth")
+            torch.save(model.state_dict(), best_path)
+            # torch.save(model.state_dict(), f"unet_best_model.pth")
+            print(f"--> New best model saved with Val Loss: {avg_val_loss:.4f}")
+
+        visualize_reconstruction(model, val_loader, device, epoch + 1, viz_dir=viz_dir)
+
         if (epoch + 1) % 5 == 0:
-            torch.save(model.state_dict(), f"unet_checkpoint_epoch_{epoch+1}.pth")
+            checkpoint_path = os.path.join(run_dir, f"checkpoint_epoch_{epoch + 1}.pth")
+            torch.save(model.state_dict(), checkpoint_path)
+            # torch.save(model.state_dict(), f"unet_checkpoint_epoch_{epoch+1}.pth")
 
 
 if __name__ == "__main__":

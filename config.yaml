@@ -18,8 +18,8 @@ data:
     stats_file: "/shared/home/lvanderpeet/percentiles_sm.npy"
 
   subaperture_config:
-    input_indices: [1,2]
-    output_indices: [3]
+    input_indices: [1,3]
+    output_indices: [2]
 
 model:
   name: "unet"
@@ -30,10 +30,17 @@ model:
 
 training:
   epochs: 50
-  learning_rate: 0.0002
+  learning_rate: 0.00001
   optimizer: "adamw"
   weight_decay: 0.01
   save_dir: "./experiments/"
   device: "cuda"
   checkpoint_interval: 5
+  scheduler:
+    patience: 1
+    factor: 0.1
+    min_lr: 1e-7
+
+save:
+  name: "test2"
 
