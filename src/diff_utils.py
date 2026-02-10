@@ -7,8 +7,7 @@ import numpy as np
 
 def setup_run_directory(config_path):
     """
-    Creates a folder based on the 'save: name:' in config.yaml
-    and copies the config file for reproducibility
+    Creates a folder based on the 'save: name:' in config.yaml and copies the config file for reproducibility
     """
     with open(config_path, "r") as f:
         cfg = yaml.safe_load(f)
@@ -28,43 +27,10 @@ def setup_run_directory(config_path):
     return run_dir, viz_dir
 
 
-# def visualize_reconstruction(model, val_loader, device, epoch, viz_dir, sa_index=0):
-#     model.eval()
-#     # Get a single batch
-#     x, y, _ = next(iter(val_loader))
-#     x, y = x.to(device), y.to(device)
-#
-#     with torch.no_grad():
-#         output = model(x)
-#
-#     # Move back to CPU for plotting
-#     # Assuming x is [B, C, H, W] and y is [B, C, H, W]
-#     # We take the first image in the batch [0] and the specific subaperture [sa_index]
-#     original = y[0, sa_index].cpu().numpy()
-#     reconstructed = output[0, sa_index].cpu().numpy()
-#     error = np.abs(original - reconstructed)
-#
-#     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-#     fig.suptitle(f"Epoch {epoch} - Subaperture {sa_index} Comparison", fontsize=16)
-#
-#     im0 = axes[0].imshow(original, cmap='magma')
-#     axes[0].set_title("Original (Ground Truth)")
-#     fig.colorbar(im0, ax=axes[0])
-#
-#     im1 = axes[1].imshow(reconstructed, cmap='magma')
-#     axes[1].set_title("UNet Reconstruction")
-#     fig.colorbar(im1, ax=axes[1])
-#
-#     im2 = axes[2].imshow(error, cmap='seismic')  # Seismic is great for diffs (red/blue)
-#     axes[2].set_title("Residual (Difference)")
-#     fig.colorbar(im2, ax=axes[2])
-#
-#     plt.tight_layout()
-#     save_path = os.path.join(viz_dir, f"epoch_{epoch}_sa{sa_index}.png")
-#     plt.savefig(f"reconstruction_epoch_{epoch}.png")
-#     plt.close()  # Close to free up memory
-
 def visualize_reconstruction(model, val_loader, device, epoch, viz_dir, sa_index=0):
+    """
+    Visualizes the original, the reconstruction and the absolute error and saves to the run's visuals folder
+    """
     model.eval()
 
     try:

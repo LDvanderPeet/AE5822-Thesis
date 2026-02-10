@@ -60,8 +60,8 @@ def train():
         min_lr=cfg["training"]["scheduler"]["min_lr"]
     )
 
+    es_counter = 0
     best_val_loss = float('inf')
-
     epochs = cfg["training"]["epochs"]
 
     for epoch in range(epochs):
@@ -100,21 +100,28 @@ def train():
         scheduler.step(avg_val_loss)
         current_lr = optimizer.param_groups[0]["lr"]
 
-        print(f"Epoch {epoch+1} Summary: Train Loss: {avg_train_loss:.4f}, Validation Loss: {avg_val_loss:.4f}")
+        print(f"Epoch {epoch+1} Summary: Train Loss: {avg_train_loss:.4f}, Validation Loss: {avg_val_loss:.4f}, LR: {current_lr}")
 
-        if avg_val_loss < best_val_loss:
+        if avg_val_loss < (best_val_loss - cfg["training"]["early_stopping"]["min_delta"]):
             best_val_loss = avg_val_loss
+            es_counter = 0
+
             best_path = os.path.join(run_dir, "unet_best_model.pth")
             torch.save(model.state_dict(), best_path)
-            # torch.save(model.state_dict(), f"unet_best_model.pth")
             print(f"--> New best model saved with Val Loss: {avg_val_loss:.4f}")
+        else:
+            es_counter += 1
+            print(f"Early Stopping counter: {es_counter} out of {cfg["training"]["early_stopping"]["patience"]}")
 
         visualize_reconstruction(model, val_loader, device, epoch + 1, viz_dir=viz_dir)
 
         if (epoch + 1) % 5 == 0:
             checkpoint_path = os.path.join(run_dir, f"checkpoint_epoch_{epoch + 1}.pth")
             torch.save(model.state_dict(), checkpoint_path)
-            # torch.save(model.state_dict(), f"unet_checkpoint_epoch_{epoch+1}.pth")
+
+        if es_counter >= cfg["training"]["early_stopping"]["patience"]:
+            print(f"Early stopping triggered! No improvement for {cfg['training']['early_stopping']['patience']} epochs")
+            break
 
 
 if __name__ == "__main__":
