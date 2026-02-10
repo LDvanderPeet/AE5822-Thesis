@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from diff_utils import visualize_reconstruction, setup_run_directory
+from diff_utils import visualize_reconstruction, setup_run_directory, log_to_csv
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from dataset import build_datasets_from_config
@@ -99,6 +99,16 @@ def train():
 
         scheduler.step(avg_val_loss)
         current_lr = optimizer.param_groups[0]["lr"]
+
+        metrics = {
+            "epoch": epoch + 1,
+            "train_loss": f"avg_train_loss: {avg_train_loss:.4f}",
+            "val_loss": f"avg_val_loss: {avg_val_loss:.4f}",
+            "lr": f"{current_lr:.2e}",
+            "es_counter": es_counter,
+        }
+
+        log_to_csv(run_dir, metrics)
 
         print(f"Epoch {epoch+1} Summary: Train Loss: {avg_train_loss:.4f}, Validation Loss: {avg_val_loss:.4f}, LR: {current_lr}")
 

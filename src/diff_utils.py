@@ -4,6 +4,23 @@ import os
 import yaml
 import shutil
 import numpy as np
+import csv
+
+def log_to_csv(run_dir, data_dict):
+    """
+    Saves training metrics to a results.csv in the run directory
+    data_dict: e.g., {"epoch": 1, "train_loss": 0.004, "val_loss": 0.0035, "lr": 1e-4}
+    """
+    csv_path = os.path.join(run_dir, "results.csv")
+    file_exists = os.path.isfile(csv_path)
+
+    with open(csv_path, mode="a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames = data_dict.keys())
+
+        if not file_exists:
+            writer.writeheader()
+
+        writer.writerow(data_dict)
 
 def setup_run_directory(config_path):
     """
