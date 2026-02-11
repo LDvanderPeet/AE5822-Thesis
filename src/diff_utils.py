@@ -5,6 +5,8 @@ import yaml
 import shutil
 import numpy as np
 import csv
+from datetime import datetime
+import pandas as pd
 
 def log_to_csv(run_dir, data_dict):
     """
@@ -30,7 +32,8 @@ def setup_run_directory(config_path):
         cfg = yaml.safe_load(f)
 
     run_name = cfg["save"]["name"]
-    run_folder_name = f"run-{run_name}"
+    time_stamp = datetime.now().strftime("%m%d_%H%M")
+    run_folder_name = f"{time_stamp}-run-{run_name}"
 
     base_project_dir = os.path.dirname(config_path)
     all_runs_dir = os.path.join(base_project_dir, "runs")
@@ -89,3 +92,38 @@ def visualize_reconstruction(model, val_loader, device, epoch, viz_dir, sa_index
     plt.savefig(save_path)
     plt.close()
 
+def generate_final_plots(run_dir):
+    """
+    Reads the results.csv and creates a plot containing the training history
+    Called automatically at the end of training
+    """
+    csv_path = os.path.join(run_dir, "results.csv")
+    if not os.path.exists(csv_path):
+        print("No results.csv found")
+        return
+
+    df = pd.read_csv(csv_path)
+
+    ig, ax1 = plt.subplots(figsize=(10, 6))
+
+    # Left Axis: Loss
+    ax1.set_xlabel('Epoch')
+    ax1.set_ylabel('Loss (MSE)', color='tab:blue')
+    ax1.plot(df['epoch'], df['train_loss'].astype(float), label='Train Loss', color='tab:blue', linestyle='--')
+    ax1.plot(df['epoch'], df['val_loss'].astype(float), label='Val Loss', color='tab:blue', linewidth=2)
+    ax1.tick_params(axis='y', labelcolor='tab:blue')
+    ax1.grid(True, which='both', linestyle='--', alpha=0.5)
+
+    # Right Axis: Learning Rate
+    ax2 = ax1.twinx()
+    ax2.set_ylabel('Learning Rate', color='tab:red')
+    ax2.step(df['epoch'], df['lr'].astype(float), color='tab:red', where='post', alpha=0.7)
+    ax2.set_yscale('log')
+    ax2.tick_params(axis='y', labelcolor='tab:red')
+
+    plt.title(f"Training History: {os.path.basename(run_dir)}")
+    ax1.legend(loc='upper right')
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(run_dir, "learning_curve.pdf"))
+    plt.close()

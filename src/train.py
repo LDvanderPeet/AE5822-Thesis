@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from diff_utils import visualize_reconstruction, setup_run_directory, log_to_csv
+from diff_utils import visualize_reconstruction, setup_run_directory, log_to_csv, generate_final_plots
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from dataset import build_datasets_from_config
@@ -63,75 +63,79 @@ def train():
     es_counter = 0
     best_val_loss = float('inf')
     epochs = cfg["training"]["epochs"]
+    try:
+        for epoch in range(epochs):
+            model.train()
+            train_loss = 0.0
 
-    for epoch in range(epochs):
-        model.train()
-        train_loss = 0.0
-
-        loop = tqdm(train_loader, desc=f"Epoch[{epoch+1}/{epochs}]")
-        for i, (x, y, _) in enumerate(loop):
-            x, y = x.to(device), y.to(device)
-
-            ## ---- Forward Pass ---- ##
-            outputs = model(x)
-            loss = criterion(outputs, y)
-
-            ## ---- Backward Pass ---- ##
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-
-            train_loss += loss.item()
-            loop.set_postfix(loss=loss.item())
-
-        model.eval()
-        val_loss = 0.0
-        val_loop = tqdm(val_loader, desc="Validating")
-        with torch.no_grad():
-            for i, (x, y, _) in enumerate(val_loop):
+            loop = tqdm(train_loader, desc=f"Epoch[{epoch+1}/{epochs}]")
+            for i, (x, y, _) in enumerate(loop):
                 x, y = x.to(device), y.to(device)
+
+                ## ---- Forward Pass ---- ##
                 outputs = model(x)
                 loss = criterion(outputs, y)
-                val_loss += loss.item()
 
-        avg_train_loss = train_loss / len(train_loader)
-        avg_val_loss = val_loss / len(val_loader)
+                ## ---- Backward Pass ---- ##
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
 
-        scheduler.step(avg_val_loss)
-        current_lr = optimizer.param_groups[0]["lr"]
+                train_loss += loss.item()
+                loop.set_postfix(loss=loss.item())
 
-        metrics = {
-            "epoch": epoch + 1,
-            "train_loss": f"avg_train_loss: {avg_train_loss:.4f}",
-            "val_loss": f"avg_val_loss: {avg_val_loss:.4f}",
-            "lr": f"{current_lr:.2e}",
-            "es_counter": es_counter,
-        }
+            model.eval()
+            val_loss = 0.0
+            val_loop = tqdm(val_loader, desc="Validating")
+            with torch.no_grad():
+                for i, (x, y, _) in enumerate(val_loop):
+                    x, y = x.to(device), y.to(device)
+                    outputs = model(x)
+                    loss = criterion(outputs, y)
+                    val_loss += loss.item()
 
-        log_to_csv(run_dir, metrics)
+            avg_train_loss = train_loss / len(train_loader)
+            avg_val_loss = val_loss / len(val_loader)
 
-        print(f"Epoch {epoch+1} Summary: Train Loss: {avg_train_loss:.4f}, Validation Loss: {avg_val_loss:.4f}, LR: {current_lr}")
+            scheduler.step(avg_val_loss)
+            current_lr = optimizer.param_groups[0]["lr"]
 
-        if avg_val_loss < (best_val_loss - cfg["training"]["early_stopping"]["min_delta"]):
-            best_val_loss = avg_val_loss
-            es_counter = 0
+            metrics = {
+                "epoch": epoch + 1,
+                "train_loss": f"avg_train_loss: {avg_train_loss:.4f}",
+                "val_loss": f"avg_val_loss: {avg_val_loss:.4f}",
+                "lr": f"{current_lr:.2e}",
+                "es_counter": es_counter,
+            }
 
-            best_path = os.path.join(run_dir, "unet_best_model.pth")
-            torch.save(model.state_dict(), best_path)
-            print(f"--> New best model saved with Val Loss: {avg_val_loss:.4f}")
-        else:
-            es_counter += 1
-            print(f"Early Stopping counter: {es_counter} out of {cfg["training"]["early_stopping"]["patience"]}")
+            log_to_csv(run_dir, metrics)
 
-        visualize_reconstruction(model, val_loader, device, epoch + 1, viz_dir=viz_dir)
+            print(f"Epoch {epoch+1} Summary: Train Loss: {avg_train_loss:.4f}, Validation Loss: {avg_val_loss:.4f}, LR: {current_lr}")
 
-        if (epoch + 1) % 5 == 0:
-            checkpoint_path = os.path.join(run_dir, f"checkpoint_epoch_{epoch + 1}.pth")
-            torch.save(model.state_dict(), checkpoint_path)
+            if avg_val_loss < (best_val_loss - cfg["training"]["early_stopping"]["min_delta"]):
+                best_val_loss = avg_val_loss
+                es_counter = 0
 
-        if es_counter >= cfg["training"]["early_stopping"]["patience"]:
-            print(f"Early stopping triggered! No improvement for {cfg['training']['early_stopping']['patience']} epochs")
-            break
+                best_path = os.path.join(run_dir, "unet_best_model.pth")
+                torch.save(model.state_dict(), best_path)
+                print(f"--> New best model saved with Val Loss: {avg_val_loss:.4f}")
+            else:
+                es_counter += 1
+                print(f"Early Stopping counter: {es_counter} out of {cfg["training"]["early_stopping"]["patience"]}")
+
+            visualize_reconstruction(model, val_loader, device, epoch + 1, viz_dir=viz_dir)
+
+            if (epoch + 1) % 5 == 0:
+                checkpoint_path = os.path.join(run_dir, f"checkpoint_epoch_{epoch + 1}.pth")
+                torch.save(model.state_dict(), checkpoint_path)
+
+            if es_counter >= cfg["training"]["early_stopping"]["patience"]:
+                print(f"Early stopping triggered! No improvement for {cfg['training']['early_stopping']['patience']} epochs")
+                break
+    except KeyboardInterrupt:
+        print("\nTraining interrupted by user (Ctrl+C). Saving current progress...")
+
+    generate_final_plots(run_dir)
 
 
 if __name__ == "__main__":
