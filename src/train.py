@@ -5,7 +5,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from diff_utils import visualize_reconstruction, setup_run_directory, log_to_csv, generate_final_plots
-from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR
 
 from dataset import build_datasets_from_config
 from models import UNet
@@ -35,8 +35,12 @@ def train():
         num_workers=cfg["data"]["train"]["num_workers"]
     )
 
-    in_ch = len(cfg["data"]["subaperture_config"]["input_indices"]) * 2
-    out_ch = len(cfg["data"]["subaperture_config"]["output_indices"]) * 2
+    in_ch = (len(cfg["data"]["subaperture_config"]["input_indices"]) *
+             cfg["data"]["subaperture_config"]["polarizations"] *
+             (2 if cfg["data"]["subaperture_config"]["is_complex"] else 1))
+    out_ch = (len(cfg["data"]["subaperture_config"]["output_indices"]) *
+              cfg["data"]["subaperture_config"]["polarizations"] *
+              (2 if cfg["data"]["subaperture_config"]["is_complex"] else 1))
 
     model = UNet(
         in_channels=in_ch,
@@ -52,12 +56,18 @@ def train():
         weight_decay=cfg["training"]["weight_decay"],
     )
 
-    scheduler = ReduceLROnPlateau(
+    # scheduler = ReduceLROnPlateau(
+    #     optimizer,
+    #     mode='min',
+    #     factor=float(cfg["training"]["scheduler"]["factor"]),
+    #     patience=int(cfg["training"]["scheduler"]["patience"]),
+    #     min_lr=float(cfg["training"]["scheduler"]["min_lr"])
+    # )
+
+    scheduler = CosineAnnealingLR(
         optimizer,
-        mode='min',
-        factor=cfg["training"]["scheduler"]["factor"],
-        patience=cfg["training"]["scheduler"]["patience"],
-        min_lr=cfg["training"]["scheduler"]["min_lr"]
+        T_max=int(cfg["training"]["epochs"]),
+        eta_min=float(cfg["training"]["scheduler"]["min_lr"]),
     )
 
     es_counter = 0
@@ -97,14 +107,15 @@ def train():
             avg_train_loss = train_loss / len(train_loader)
             avg_val_loss = val_loss / len(val_loader)
 
-            scheduler.step(avg_val_loss)
+            # scheduler.step(avg_val_loss)
+            scheduler.step()
             current_lr = optimizer.param_groups[0]["lr"]
 
             metrics = {
                 "epoch": epoch + 1,
-                "train_loss": f"avg_train_loss: {avg_train_loss:.4f}",
-                "val_loss": f"avg_val_loss: {avg_val_loss:.4f}",
-                "lr": f"{current_lr:.2e}",
+                "train_loss": avg_train_loss,
+                "val_loss": avg_val_loss,
+                "lr": current_lr,
                 "es_counter": es_counter,
             }
 
@@ -112,7 +123,7 @@ def train():
 
             print(f"Epoch {epoch+1} Summary: Train Loss: {avg_train_loss:.4f}, Validation Loss: {avg_val_loss:.4f}, LR: {current_lr}")
 
-            if avg_val_loss < (best_val_loss - cfg["training"]["early_stopping"]["min_delta"]):
+            if avg_val_loss < (best_val_loss - float(cfg["training"]["early_stopping"]["min_delta"])):
                 best_val_loss = avg_val_loss
                 es_counter = 0
 
