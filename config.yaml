@@ -1,6 +1,6 @@
 
 data:
-  root_dir: "/shared/home/lvanderpeet/subaps/sbs"
+  root_dir: "/shared/home/lvanderpeet/AE5822-Thesis/data/"
 
   train:
     tensor_dir: "out_tensors_train_x96"
@@ -21,7 +21,7 @@ data:
     input_indices: [1,3]
     output_indices: [2]
     polarizations: 2
-    is_complex: False
+    is_complex: True
 
 model:
   name: "unet"

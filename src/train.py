@@ -7,7 +7,7 @@ from tqdm import tqdm
 from diff_utils import visualize_reconstruction, setup_run_directory, log_to_csv, generate_final_plots
 from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR
 
-from dataset import build_datasets_from_config
+from dataset import build_complex_datasets_from_config
 from models import UNet
 
 def train():
@@ -20,7 +20,7 @@ def train():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    train_ds, val_ds = build_datasets_from_config(config_path)
+    train_ds, val_ds, metadata = build_complex_datasets_from_config(config_path)
 
     train_loader = DataLoader(
         train_ds,
