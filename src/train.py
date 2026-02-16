@@ -11,6 +11,9 @@ from dataset import build_complex_datasets_from_config
 from models import UNet
 
 def train():
+    """
+    Main training pipeline for the SAR reconstruction model.
+    """
     config_path = "/shared/home/lvanderpeet/AE5822-Thesis/config.yaml"
 
     run_dir, viz_dir = setup_run_directory(config_path)
@@ -20,7 +23,7 @@ def train():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    train_ds, val_ds, metadata = build_complex_datasets_from_config(config_path)
+    train_ds, val_ds, test_ds = build_complex_datasets_from_config(config_path)
 
     train_loader = DataLoader(
         train_ds,

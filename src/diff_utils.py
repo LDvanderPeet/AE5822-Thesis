@@ -10,8 +10,17 @@ import pandas as pd
 
 def log_to_csv(run_dir, data_dict):
     """
-    Saves training metrics to a results.csv in the run directory
-    data_dict: e.g., {"epoch": 1, "train_loss": 0.004, "val_loss": 0.0035, "lr": 1e-4}
+    Saves current epoch metrics to a CSV file for tracking.
+
+    If the file does not exist, it creates it and writes a header based on the keys in data_dict.
+
+    Parameters
+    ----------
+    run_dir : str
+        Path to the specific experiment directory.
+    data_dict : dict
+        Dictionary of training metrics and their respective values
+        e.g., {"epoch": 1, "train_loss": 0.004, "val_loss": 0.0035, "lr": 1e-4}.
     """
     csv_path = os.path.join(run_dir, "results.csv")
     file_exists = os.path.isfile(csv_path)
@@ -26,7 +35,14 @@ def log_to_csv(run_dir, data_dict):
 
 def setup_run_directory(config_path):
     """
-    Creates a folder based on the 'save: name:' in config.yaml and copies the config file for reproducibility
+    Initialize a unique experiment folder with a timestamp and configuration copy.
+
+    Ensures reproducibility by saving the exact config.yaml and results in one folder.
+
+    Parameters
+    ----------
+    config_path : str
+        Path to the config.yaml file.
     """
     with open(config_path, "r") as f:
         cfg = yaml.safe_load(f)
@@ -49,7 +65,20 @@ def setup_run_directory(config_path):
 
 def visualize_reconstruction(model, val_loader, device, epoch, viz_dir, sa_index=0):
     """
-    Visualizes the original, the reconstruction and the absolute error and saves to the run's visuals folder
+    Generate and save comparison between Ground Truth and Model Prediction.
+
+    Parameters
+    ----------
+    model : torch.nn.Module
+        The trained SAR model.
+    val_loader : torch.utils.data.DataLoader
+        Validation data loader to pull a sample from.
+    epoch : int
+        Current epoch number for labeling of filename.
+    viz_dir : str
+        Directory where the resulting .png will be saved.
+    sa_index : int
+        The index of the subaperture to visualize.
     """
     model.eval()
 
@@ -94,8 +123,12 @@ def visualize_reconstruction(model, val_loader, device, epoch, viz_dir, sa_index
 
 def generate_final_plots(run_dir):
     """
-    Reads the results.csv and creates a plot containing the training history
-    Called automatically at the end of training
+    Analyze the results.csv to produce a learning curve.
+
+    Parameters
+    ----------
+    run_dir : str
+        The experiment directory containing 'results.csv'.
     """
     csv_path = os.path.join(run_dir, "results.csv")
     if not os.path.exists(csv_path):

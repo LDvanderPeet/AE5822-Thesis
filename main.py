@@ -6,7 +6,12 @@ import traceback
 
 def set_seed(seed=12):
     """
-    Ensures reproducibility with a fixed seed.
+    Configure all random number generators to produce reproducible results.
+
+    Parameters
+    ----------
+    seed : int, optional
+        The seed value used to initialize the RNG (default is 12).
     """
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
@@ -16,6 +21,7 @@ def set_seed(seed=12):
     torch.backends.cudnn.benchmark = False
 
 def main():
+    """Execution of the SAR reconstruction pipeline."""
     set_seed()
 
     try:
