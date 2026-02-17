@@ -5,7 +5,8 @@ data:
   train:
     tensor_dir: "out_tensors_train_x96"
     csv: "out_tensors_train_x96/train_metadata_x96.csv"
-    image_size: 96
+    image_height: 1024
+    image_width: 240
     batch_size: 128
     num_workers: 8
 

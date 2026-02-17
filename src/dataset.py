@@ -7,31 +7,87 @@ import zarr
 import torch
 from torch.utils.data import Dataset
 import matplotlib.pyplot as plt
+from collections import Counter
+from tqdm import tqdm
 
 
 def tfm_dihedral(x, k):
-    """
-    Apply one of eight possible dihedral transformations to a list of tensors.
+    """Strip-safe augmentations. Only allows flips/rotations that keep the 1024x240 aspect ratio.
 
     Parameters
     ----------
     x : list of torch.Tensor
         A list containing the data tensors.
     k : int
-        An integer from 0 to 7 defining the specfic transformation.
+        An integer from 0 to 7 defining the specific transformation.
         0: Identity (original)
         1: Flip top-bottom
         2: Flip left-right
-        3: Rotate 180 deg + flip top-bottom
-        4: Flip both
-        5: Transpose + flip left-right
-        6: Transpose
-        7: Full dihedral
+        3: Rotate 180 deg
     """
-    if k in [1, 3, 4, 7]: x = [_x.flip(-2) for _x in x]
-    if k in [2, 4, 5, 7]: x = [_x.flip(-1) for _x in x]
-    if k in [3, 5, 6, 7]: x = [_x.transpose(-2, -1) for _x in x]
+    if k in [1,3]: x = [_x.flip(-2) for _x in x]
+    if k in [2,3]: x = [_x.flip(-1) for _x in x]
     return x
+
+
+def _normalize(x, y):
+    """
+    Applies unit sphere normalization based on the 99th percentile of magnitude.
+
+    Both input and target are scaled by the same factor derived from the input (x) to preserve relative intensity
+    relationship.
+
+    Parameters
+    ----------
+    x : torch.Tensor
+        Input subapertures tensor (channels, H, W).
+    y : torch.Tensor
+        Output subapertures tensor (channels, H, W).
+    """
+    real = x[0::2]
+    imag = x[1::2]
+    mag = torch.sqrt(real**2 + imag**2)
+
+    v_max = torch.quantile(mag, 0.99)
+    scale = v_max + 1e-6
+
+    x_norm = x / scale
+    y_norm = y / scale
+
+    return torch.clamp(x_norm, -1.0, 1.0), torch.clamp(y_norm, -1.0, 1.0)
+
+
+def _strip_crop(x, y, target_h, target_w):
+    """
+    Forces x and y to the exact same target dimensions.
+
+    Parameters
+    ----------
+    x : torch.Tensor
+        The data tensors.
+    y : torch.Tensor
+        The target tensors.
+    target_h : int
+        Target height of the SAR image.
+    target_w : int
+        Target width of the SAR image.
+    """
+    c, h, w = x.shape
+
+    if w > h:
+        x = x.transpose(-1, -2)
+        y = y.transpose(-1, -2)
+        c, h, w = x.shape
+
+    x = x.narrow(1, 0, target_h)
+    y = y.narrow(1, 0, target_h)
+
+    start_w = (w - target_w) // 2
+
+    x = x.narrow(2, start_w, target_w)
+    y = y.narrow(2, start_w, target_w)
+
+    return x, y
 
 
 class ComplexSARDataset(Dataset):
@@ -41,8 +97,6 @@ class ComplexSARDataset(Dataset):
 
     Handles loading of Zarr-backed subaperture data, splitting by patch IDs, and interleaving complex components into
     real channels.
-
-
     """
     def __init__(self, cfg, split='train', da=False):
         """
@@ -79,7 +133,11 @@ class ComplexSARDataset(Dataset):
             pols_exist = all(os.path.exists(os.path.join(patch_path, p)) for p in self.requested_pols)
 
             if pols_exist:
-                self.patch_ids.append(pid)
+                ref_pol = self.requested_pols[0]
+                json_path = os.path.join(patch_path, ref_pol, "metadata.json")
+                zarr_path = os.path.join(patch_path, ref_pol, self.sub_folder_name)
+                if os.path.exists(json_path) and os.path.exists(zarr_path):
+                    self.patch_ids.append(pid)
 
         n = len(self.patch_ids)
 
@@ -92,31 +150,6 @@ class ComplexSARDataset(Dataset):
         else:
             raise ValueError(f"Invalid split name: '{split}'. Expected 'train', 'valid', or 'test'.")
         print(f"Split {split}: Found {len(self.patch_ids)} valid patched containing {self.requested_pols}")
-
-    def _normalize(self, x, y):
-        """
-        Applies unit sphere normalization based on the 99th percentile of magnitude.
-
-        Both input and target are scaled by the same factor derived from the input (x) to preserve relative intensity
-        relationship.
-
-        Parameters
-        ----------
-        x : torch.Tensor
-            Input subapertures tensor (channels, H, W).
-        y : torch.Tensor
-            Output subapertures tensor (channels, H, W).
-        """
-        real = x[0::2]
-        imag = x[1::2]
-        mag = torch.sqrt(real**2 + imag**2)
-
-        v_max = torch.quantile(mag, 0.99)
-
-        x_norm = x / v_max
-        y_norm = y / v_max
-
-        return torch.clamp(x_norm, -1.0, 1.0), torch.clamp(y_norm, -1.0, 1.0)
 
     def __len__(self):
         """Returns the total number of patches in the current split."""
@@ -186,7 +219,11 @@ class ComplexSARDataset(Dataset):
             x = x.transpose(-1, -2)
             y = y.transpose(-1, -2)
 
-        x, y = self._normalize(x, y)
+        x, y = _normalize(x, y)
+
+        target_height = self.cfg["data"]["train"]["image_height"]
+        target_width = self.cfg["data"]["train"]["image_width"]
+        x, y = _strip_crop(x, y, target_height, target_width)
 
         if self.da:
             x, y = tfm_dihedral([x, y], random.randint(0, 7))
@@ -226,3 +263,17 @@ if __name__ == "__main__":
     train_ds, val_ds, test_ds = build_complex_datasets_from_config("/shared/home/lvanderpeet/AE5822-Thesis/config.yaml")
     x, y, meta = train_ds[0]
     print(x.shape, y.shape, meta["incidence_angle"], meta["idx"])
+
+
+    def check_shapes(ds, name):
+        print(f"\nChecking shapes for {name}...")
+        shapes = []
+        for i in tqdm(range(len(ds))):
+            x, _, _ = ds[i]
+            shapes.append(tuple(x.shape))
+
+        counts = Counter(shapes)
+        for shape, count in counts.items():
+            print(f"Shape {shape}: {count} patches")
+
+    check_shapes(train_ds, "train")
