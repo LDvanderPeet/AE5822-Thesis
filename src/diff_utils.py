@@ -98,12 +98,15 @@ def visualize_reconstruction(model, val_loader, device, epoch, viz_dir, sa_index
     """
     model.eval()
 
-    try:
-        x, y, meta = next(iter(val_loader))
-    except StopIteration:
-        return
+    dataset = val_loader.dataset
+    x, y, meta = dataset[sample_idx]
 
-    x, y = x.to(device), y.to(device)
+    # try:
+    #     x, y, meta = next(iter(val_loader))
+    # except StopIteration:
+    #     return
+
+    x, y = x.unsqueeze(0).to(device), y.unsqueeze(0).to(device)
 
     with torch.no_grad():
         output = model(x)
@@ -160,7 +163,6 @@ def generate_final_plots(run_dir):
 
     ig, ax1 = plt.subplots(figsize=(10, 6))
 
-    # Left Axis: Loss
     ax1.set_xlabel('Epoch')
     ax1.set_ylabel('Loss (MSE)', color='tab:blue')
     ax1.plot(df['epoch'], df['train_loss'].astype(float), label='Train Loss', color='tab:blue', linestyle='--')
@@ -168,7 +170,6 @@ def generate_final_plots(run_dir):
     ax1.tick_params(axis='y', labelcolor='tab:blue')
     ax1.grid(True, which='both', linestyle='--', alpha=0.5)
 
-    # Right Axis: Learning Rate
     ax2 = ax1.twinx()
     ax2.set_ylabel('Learning Rate', color='tab:red')
     ax2.step(df['epoch'], df['lr'].astype(float), color='tab:red', where='post', alpha=0.7)
@@ -190,13 +191,6 @@ def sar_collate_fn(batch):
     ys_aligned = [target[:, :, :min_w] for target in ys]
     return torch.stack(xs_aligned), torch.stack(ys_aligned), metas
 
-def complex_magnitude_loss(pred, target, alpha=0.5):
-    """
-    Combined loss for Real/Imaginary SAR data
-    """
-    mse_loss = nn.MSELoss()(pred, target)
-
-
 
 def get_criterion(cfg):
     loss_type = cfg["training"]["loss_function"]
@@ -215,8 +209,8 @@ def get_criterion(cfg):
             mse_loss = nn.MSELoss()(pred, target)
 
             eps = 1e-8
-            pred_real, pred_imag = pred[:, 0::1, ...], pred[:, 1::2, ...]
-            true_real, true_imag = target[:, 0::1, ...], target[:, 1::2, ...]
+            pred_real, pred_imag = pred[:, 0::2, ...], pred[:, 1::2, ...]
+            true_real, true_imag = target[:, 0::2, ...], target[:, 1::2, ...]
 
             mag_pred = torch.sqrt(pred_real ** 2 + pred_imag ** 2 + eps)
             mag_true = torch.sqrt(true_real ** 2 + true_imag ** 2 + eps)
