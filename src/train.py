@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from diff_utils import visualize_reconstruction, setup_run_directory, log_to_csv, generate_final_plots
+from diff_utils import visualize_reconstruction, setup_run_directory, log_to_csv, generate_final_plots, sar_collate_fn, get_criterion
 from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR
 
 from dataset import build_complex_datasets_from_config
@@ -29,21 +29,29 @@ def train():
         train_ds,
         batch_size=cfg["data"]["train"]["batch_size"],
         shuffle=True,
-        num_workers=cfg["data"]["train"]["num_workers"]
+        num_workers=cfg["data"]["train"]["num_workers"],
+        collate_fn=sar_collate_fn
     )
     val_loader = DataLoader(
         val_ds,
         batch_size=cfg["data"]["train"]["batch_size"],
         shuffle=True,
-        num_workers=cfg["data"]["train"]["num_workers"]
+        num_workers=cfg["data"]["train"]["num_workers"],
+        collate_fn=sar_collate_fn
+    )
+    test_loader = DataLoader(
+        test_ds,
+        batch_size=1,
+        shuffle=False,
+        collate_fn=sar_collate_fn
     )
 
-    in_ch = (len(cfg["data"]["subaperture_config"]["input_indices"]) *
-             cfg["data"]["subaperture_config"]["polarizations"] *
-             (2 if cfg["data"]["subaperture_config"]["is_complex"] else 1))
-    out_ch = (len(cfg["data"]["subaperture_config"]["output_indices"]) *
-              cfg["data"]["subaperture_config"]["polarizations"] *
-              (2 if cfg["data"]["subaperture_config"]["is_complex"] else 1))
+    active_pols = cfg["data"]["subaperture_config"]["active_polarizations"]
+    num_pols = len(active_pols)
+    is_complex = (2 if cfg["data"]["subaperture_config"]["is_complex"] else 1)
+
+    in_ch = len(cfg["data"]["subaperture_config"]["input_indices"]) * num_pols * is_complex
+    out_ch = len(cfg["data"]["subaperture_config"]["output_indices"]) * num_pols * is_complex
 
     model = UNet(
         in_channels=in_ch,
@@ -52,7 +60,7 @@ def train():
         depth=cfg["model"]["depth"],
     ).to(device)
 
-    criterion = nn.MSELoss()
+    criterion = get_criterion(cfg)
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=cfg["training"]["learning_rate"],
@@ -89,9 +97,17 @@ def train():
                 outputs = model(x)
                 loss = criterion(outputs, y)
 
+                if torch.isnan(loss):
+                    print("--- NaN Detected! ---")
+                    print(f"Input X - Max: {x.max().item()}, Min: {x.min().item()}")
+                    print(f"Target Y - Max: {y.max().item()}, Min: {y.min().item()}")
+                    print(f"Model Output - Max: {outputs.max().item()}, Min: {outputs.min().item()}")
+                    raise ValueError("Stopping due to NaN")
+
                 ## ---- Backward Pass ---- ##
                 optimizer.zero_grad()
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
 
                 train_loss += loss.item()
@@ -124,7 +140,7 @@ def train():
 
             log_to_csv(run_dir, metrics)
 
-            print(f"Epoch {epoch+1} Summary: Train Loss: {avg_train_loss:.4f}, Validation Loss: {avg_val_loss:.4f}, LR: {current_lr}")
+            print(f"Epoch {epoch+1} Summary: Train Loss: {avg_train_loss:.4f}, Validation Loss: {avg_val_loss:.4f}, LR: {current_lr:.4f}")
 
             if avg_val_loss < (best_val_loss - float(cfg["training"]["early_stopping"]["min_delta"])):
                 best_val_loss = avg_val_loss
@@ -137,7 +153,7 @@ def train():
                 es_counter += 1
                 print(f"Early Stopping counter: {es_counter} out of {cfg["training"]["early_stopping"]["patience"]}")
 
-            visualize_reconstruction(model, val_loader, device, epoch + 1, viz_dir=viz_dir)
+            visualize_reconstruction(model, val_loader, device, epoch + 1, viz_dir=viz_dir, sa_index=cfg["data"]["subaperture_config"]["output_indices"])
 
             if (epoch + 1) % 5 == 0:
                 checkpoint_path = os.path.join(run_dir, f"checkpoint_epoch_{epoch + 1}.pth")
@@ -150,6 +166,31 @@ def train():
         print("\nTraining interrupted by user (Ctrl+C). Saving current progress...")
 
     generate_final_plots(run_dir)
+
+    print("\n>>>Training complete. Starting evaluation on test set...")
+    best_model_path = os.path.join(run_dir, "unet_best_model.pth")
+    if os.path.exists(best_model_path):
+        model.load_state_dict(torch.load(best_model_path, weights_only=True))
+        print(f"Loaded best model from {best_model_path}")
+
+    model.eval()
+    test_loss = 0.0
+
+    test_viz_dir = os.path.join(run_dir, "test_results")
+    os.makedirs(test_viz_dir, exist_ok=True)
+
+    with torch.no_grad():
+        test_loop = tqdm(test_loader, desc="Testing")
+        for i, (x, y, _) in enumerate(test_loop):
+            x, y = x.to(device), y.to(device)
+            outputs = model(x)
+
+            loss = criterion(outputs, y)
+            test_loss += loss.item()
+    av_test_loss = test_loss / len(test_loader)
+    print(f"Final test loss: {av_test_loss:.6f}")
+
+    visualize_reconstruction(model, test_loader, device, epoch + 1, viz_dir=test_viz_dir, sa_index=cfg["data"]["subaperture_config"]["output_indices"])
 
 
 if __name__ == "__main__":
