@@ -1,5 +1,6 @@
 import matplotlib.pyplot as plt
 import torch
+import torch.nn as nn
 import os
 import yaml
 import shutil
@@ -63,7 +64,22 @@ def setup_run_directory(config_path):
     return run_dir, viz_dir
 
 
-def visualize_reconstruction(model, val_loader, device, epoch, viz_dir, sa_index=0):
+def denormalize(tensor, global_max=4257):
+    """Reverses the unit sphere normalization."""
+    return tensor * global_max
+
+
+def get_physical_magnitude(tensor, global_max=4257):
+    """Converts normalized real/imaginary components back to the physical magnitude."""
+    re = tensor[:, 0::2, ...]
+    im = tensor[:, 1::2, ...]
+
+    mag_norm = torch.sqrt(re ** 2 + im ** 2)
+
+    return mag_norm * global_max
+
+
+def visualize_reconstruction(model, val_loader, device, epoch, viz_dir, sa_index=0, global_max=4257, sample_idx=238):
     """
     Generate and save comparison between Ground Truth and Model Prediction.
 
@@ -83,7 +99,7 @@ def visualize_reconstruction(model, val_loader, device, epoch, viz_dir, sa_index
     model.eval()
 
     try:
-        x, y, _ = next(iter(val_loader))
+        x, y, meta = next(iter(val_loader))
     except StopIteration:
         return
 
@@ -92,27 +108,32 @@ def visualize_reconstruction(model, val_loader, device, epoch, viz_dir, sa_index
     with torch.no_grad():
         output = model(x)
 
-    original = y[0, sa_index].cpu().numpy()
+    # def to_mag(tensor):
+    #     re = tensor[:, 0::2, ...]
+    #     im = tensor[:, 1::2, ...]
+    #     mag = torch.sqrt(re**2 + im**2)
+    #     return mag[0,0].cpu().numpy()
 
-    out_idx = 0 if output.shape[1] == 1 else sa_index
-    reconstructed = output[0, out_idx].cpu().numpy()
+    gt_mag = get_physical_magnitude(y, global_max)[0, 0].cpu().numpy()
+    pred_mag = get_physical_magnitude(output, global_max)[0, 0].cpu().numpy()
+    err_mag = np.abs(gt_mag - pred_mag)
 
-    abs_error = np.abs(original - reconstructed)
+    # gt_mag = to_mag(y)
+    # pred_mag = to_mag(output)
+    # err_mag = np.abs(gt_mag - pred_mag)
 
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    fig, axes = plt.subplots(1, 3, figsize=(15, 10))
     fig.suptitle(f"Epoch {epoch} - Subaperture {sa_index} Analysis", fontsize=16)
 
-    v_min, v_max = original.min(), original.max()
-
-    im0 = axes[0].imshow(original, cmap='magma', vmin=v_min, vmax=v_max)
-    axes[0].set_title("Original (GT)")
+    im0 = axes[0].imshow(gt_mag, cmap='magma', vmin=0, vmax=global_max)
+    axes[0].set_title("Original Magnitude")
     fig.colorbar(im0, ax=axes[0])
 
-    im1 = axes[1].imshow(reconstructed, cmap='magma')
+    im1 = axes[1].imshow(pred_mag, cmap='magma')
     axes[1].set_title("Reconstruction (Auto-scaled)")
     fig.colorbar(im1, ax=axes[1])
 
-    im2 = axes[2].imshow(abs_error, cmap='viridis')
+    im2 = axes[2].imshow(err_mag, cmap='viridis')
     axes[2].set_title("Absolute Error")
     fig.colorbar(im2, ax=axes[2])
 
@@ -160,3 +181,52 @@ def generate_final_plots(run_dir):
     plt.tight_layout()
     plt.savefig(os.path.join(run_dir, "learning_curve.pdf"))
     plt.close()
+
+def sar_collate_fn(batch):
+    """Converts the batch image size to the minimum shape that is divisible by 16."""
+    xs, ys, metas = zip(*batch)
+    min_w = min([img.shape[2] for img in xs])
+    xs_aligned = [img[:, :, :min_w] for img in xs]
+    ys_aligned = [target[:, :, :min_w] for target in ys]
+    return torch.stack(xs_aligned), torch.stack(ys_aligned), metas
+
+def complex_magnitude_loss(pred, target, alpha=0.5):
+    """
+    Combined loss for Real/Imaginary SAR data
+    """
+    mse_loss = nn.MSELoss()(pred, target)
+
+
+
+def get_criterion(cfg):
+    loss_type = cfg["training"]["loss_function"]
+    params = cfg["training"]["loss_params"]
+
+    if loss_type == "mse":
+        return nn.MSELoss()
+
+    elif loss_type == "mae":
+        return nn.L1Loss()
+
+    elif loss_type == "complex_magnitude":
+        alpha = params.get("alpha", 0.5)
+
+        def magnitude_weighted_loss(pred, target):
+            mse_loss = nn.MSELoss()(pred, target)
+
+            eps = 1e-8
+            pred_real, pred_imag = pred[:, 0::1, ...], pred[:, 1::2, ...]
+            true_real, true_imag = target[:, 0::1, ...], target[:, 1::2, ...]
+
+            mag_pred = torch.sqrt(pred_real ** 2 + pred_imag ** 2 + eps)
+            mag_true = torch.sqrt(true_real ** 2 + true_imag ** 2 + eps)
+
+            mag_loss = nn.MSELoss()(mag_pred, mag_true)
+            return (1 - alpha) * mse_loss + alpha * mag_loss
+        return magnitude_weighted_loss
+
+    else:
+        raise ValueError(f"Unknown loss function: {loss_type}")
+
+
+
