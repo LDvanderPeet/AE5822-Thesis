@@ -30,7 +30,7 @@ def tfm_dihedral(x, k):
     return x
 
 
-def _normalize(x, y):
+def _normalize(x, y, global_max=4257):
     """
     Applies unit sphere normalization based on the 99th percentile of magnitude.
 
@@ -44,15 +44,11 @@ def _normalize(x, y):
     y : torch.Tensor
         Output subapertures tensor (channels, H, W).
     """
-    real = x[0::2]
-    imag = x[1::2]
-    mag = torch.sqrt(real**2 + imag**2)
+    x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+    y = torch.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
 
-    v_max = torch.quantile(mag, 0.99)
-    scale = v_max + 1e-6
-
-    x_norm = x / scale
-    y_norm = y / scale
+    x_norm = x / global_max
+    y_norm = y / global_max
 
     return torch.clamp(x_norm, -1.0, 1.0), torch.clamp(y_norm, -1.0, 1.0)
 
@@ -74,18 +70,12 @@ def _strip_crop(x, y, target_h, target_w):
     """
     c, h, w = x.shape
 
-    if w > h:
-        x = x.transpose(-1, -2)
-        y = y.transpose(-1, -2)
-        c, h, w = x.shape
+    final_w = (min(target_w, w) // 16) * 16
 
-    x = x.narrow(1, 0, target_h)
-    y = y.narrow(1, 0, target_h)
+    start_w = (w - final_w) // 2
 
-    start_w = (w - target_w) // 2
-
-    x = x.narrow(2, start_w, target_w)
-    y = y.narrow(2, start_w, target_w)
+    x = x.narrow(2, start_w, final_w)
+    y = y.narrow(2, start_w, final_w)
 
     return x, y
 
@@ -265,15 +255,15 @@ if __name__ == "__main__":
     print(x.shape, y.shape, meta["incidence_angle"], meta["idx"])
 
 
-    def check_shapes(ds, name):
-        print(f"\nChecking shapes for {name}...")
-        shapes = []
-        for i in tqdm(range(len(ds))):
-            x, _, _ = ds[i]
-            shapes.append(tuple(x.shape))
-
-        counts = Counter(shapes)
-        for shape, count in counts.items():
-            print(f"Shape {shape}: {count} patches")
-
-    check_shapes(train_ds, "train")
+    # def check_shapes(ds, name):
+    #     print(f"\nChecking shapes for {name}...")
+    #     shapes = []
+    #     for i in tqdm(range(len(ds))):
+    #         x, _, _ = ds[i]
+    #         shapes.append(tuple(x.shape))
+    #
+    #     counts = Counter(shapes)
+    #     for shape, count in counts.items():
+    #         print(f"Shape {shape}: {count} patches")
+    #
+    # check_shapes(train_ds, "train")
