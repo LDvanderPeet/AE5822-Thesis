@@ -1,27 +1,59 @@
 import os
 import yaml
 import torch
-import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from diff_utils import visualize_reconstruction, setup_run_directory, log_to_csv, generate_final_plots, sar_collate_fn, get_criterion
+from diff_utils import (
+    DiffusionEngine,
+    visualize_reconstruction,
+    setup_run_directory,
+    log_to_csv,
+    generate_final_plots,
+    sar_collate_fn,
+    get_criterion
+)
 from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR
-
 from dataset import build_complex_datasets_from_config
 from models import UNet
 
 def train():
     """
     Main training pipeline for the SAR reconstruction model.
+
+    This function orchestrates the entire experimental workflow, including:
+    1.  **Environment Setup**: Initializes run directories, logs, and device allocation.
+    2.  **Data Loading**: Builds Zarr-backed datasets for train, validation, and test splits.
+    3.  **Model Initialization**: Configures a UNet architecture with channel counts
+        dynamically calculated to preserve interleaved real and imaginary components.
+    4.  **Training Logic**:
+        - If `is_diffusion` is True: Trains the model as a conditional noise predictor (DDPM).
+        - If `is_diffusion` is False: Performs standard image-to-image regression.
+    5.  **Validation & Callbacks**: Implements early stopping based on validation loss,
+        cosine annealing learning rate scheduling, and periodic visual reconstructions.
+    6.  **Evaluation**: Loads the 'best' weight checkpoint and calculates final metrics
+        on the unseen test partition.
+
+    Notes
+    -----
+    The input channel count ($in\_ch$) and output channel count ($out\_ch$) are derived
+    using the logic: $N_{subapertures} \times N_{polarizations} \times 2$ (for complex data).
     """
     config_path = "/shared/home/lvanderpeet/AE5822-Thesis/config.yaml"
-
     run_dir, viz_dir = setup_run_directory(config_path)
+
     with open(config_path, "r") as f:
         cfg = yaml.safe_load(f)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+
+    is_diffusion = cfg["model"]["diffusion"]
+    engine = None
+    if is_diffusion:
+        engine = DiffusionEngine(
+            num_steps = cfg["model"]["num_steps"],
+            device = device
+        )
 
     train_ds, val_ds, test_ds = build_complex_datasets_from_config(config_path)
 
@@ -58,6 +90,7 @@ def train():
         out_channels= out_ch,
         base_channels=cfg["model"]["base_channels"],
         depth=cfg["model"]["depth"],
+        is_diffusion=cfg["model"]["diffusion"]
     ).to(device)
 
     criterion = get_criterion(cfg)
@@ -73,6 +106,7 @@ def train():
     #     factor=float(cfg["training"]["scheduler"]["factor"]),
     #     patience=int(cfg["training"]["scheduler"]["patience"]),
     #     min_lr=float(cfg["training"]["scheduler"]["min_lr"])
+
     # )
 
     scheduler = CosineAnnealingLR(
@@ -93,15 +127,27 @@ def train():
             for i, (x, y, _) in enumerate(loop):
                 x, y = x.to(device), y.to(device)
 
+                if is_diffusion:
+                    t = torch.randint(0, engine.num_steps, (x.shape[0],), device=device).long()
+                    noise = torch.randn_like(y)
+                    y_t = engine.add_noise(y, noise, t)
+
+                    model_input = torch.cat([x, y_t], dim=1)
+                    pred_noise = model(model_input, t)
+                    loss = criterion(pred_noise, noise)
+                else:
+                    output = model(x)
+                    loss = criterion(output, y)
+
                 ## ---- Forward Pass ---- ##
-                outputs = model(x)
-                loss = criterion(outputs, y)
+                # outputs = model(x)
+                # loss = criterion(outputs, y)
 
                 if torch.isnan(loss):
                     print("--- NaN Detected! ---")
                     print(f"Input X - Max: {x.max().item()}, Min: {x.min().item()}")
                     print(f"Target Y - Max: {y.max().item()}, Min: {y.min().item()}")
-                    print(f"Model Output - Max: {outputs.max().item()}, Min: {outputs.min().item()}")
+                    print(f"Model Output - Max: {output.max().item()}, Min: {output.min().item()}")
                     raise ValueError("Stopping due to NaN")
 
                 ## ---- Backward Pass ---- ##
@@ -109,7 +155,6 @@ def train():
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
-
                 train_loss += loss.item()
                 loop.set_postfix(loss=loss.item())
 
@@ -119,8 +164,15 @@ def train():
             with torch.no_grad():
                 for i, (x, y, _) in enumerate(val_loop):
                     x, y = x.to(device), y.to(device)
-                    outputs = model(x)
-                    loss = criterion(outputs, y)
+                    if is_diffusion:
+                        t = torch.randint(0, engine.num_steps, (x.shape[0],), device=device).long()
+                        noise = torch.randn_like(y)
+                        y_t = engine.add_noise(y, noise, t)
+                        pred_noise = model(torch.cat([x, y_t], dim=1), t)
+                        loss = criterion(pred_noise, noise)
+                    else:
+                        loss = criterion(model(x), y)
+
                     val_loss += loss.item()
 
             avg_train_loss = train_loss / len(train_loader)
@@ -153,7 +205,7 @@ def train():
                 es_counter += 1
                 print(f"Early Stopping counter: {es_counter} out of {cfg["training"]["early_stopping"]["patience"]}")
 
-            visualize_reconstruction(model, val_loader, device, epoch + 1, viz_dir=viz_dir, sa_index=cfg["data"]["subaperture_config"]["output_indices"])
+            visualize_reconstruction(model, val_loader, device, epoch + 1, viz_dir=viz_dir, engine=engine, sa_index=cfg["data"]["subaperture_config"]["output_indices"])
 
             if (epoch + 1) % 5 == 0:
                 checkpoint_path = os.path.join(run_dir, f"checkpoint_epoch_{epoch + 1}.pth")
@@ -190,7 +242,7 @@ def train():
     av_test_loss = test_loss / len(test_loader)
     print(f"Final test loss: {av_test_loss:.6f}")
 
-    visualize_reconstruction(model, test_loader, device, epoch + 1, viz_dir=test_viz_dir, sa_index=cfg["data"]["subaperture_config"]["output_indices"])
+    visualize_reconstruction(model, test_loader, device, epoch + 1, viz_dir=test_viz_dir, engine=engine, sa_index=cfg["data"]["subaperture_config"]["output_indices"])
 
 
 if __name__ == "__main__":
