@@ -6,7 +6,15 @@ import math
 
 class TimeEmbedding(nn.Module):
     """
-    Encodes scalar timesteps into vector embeddings.
+    Encodes scalar timesteps into sinusoidal vector embeddings.
+
+    Uses the standard Transformer-style positional encoding to map discrete timesteps $t$ to a high-dimensional space,
+    allowing the U-Net to be conditioned on the diffusion noise level.
+
+    Parameters
+    ----------
+    dim : int
+        The dimensionality of the resulting embedding vector.
     """
     def __init__(self, dim):
         super().__init__()
@@ -24,7 +32,10 @@ class TimeEmbedding(nn.Module):
 
 class DoubleConv(nn.Module):
     """
-    DoubleConv block
+    Standard block containing two successive 3x3 convolutions.
+
+    If `time_emb_dim` is provided, a linear projection is used to add temporal information into the feature maps between
+    the two convolutions.
 
     Parameters
     ----------
@@ -32,6 +43,8 @@ class DoubleConv(nn.Module):
         Number of input channels.
     out_channels : int
         Number of output channels.
+    time_emb_dim : int, optional
+        The dimension of the time embedding vector for diffusion conditioning.
     """
     def __init__(self, in_channels, out_channels, time_emb_dim=None):
         super().__init__()
@@ -57,7 +70,9 @@ class DoubleConv(nn.Module):
 
 class Down(nn.Module):
     """
-    Downscaling block: MaxPool + DoubleConv
+    Downscaling block that reduces spatial resolution.
+
+    Applies MaxPool2d followed by a `DoubleConv` block.
 
     Parameters
     ----------
@@ -65,6 +80,8 @@ class Down(nn.Module):
         Number of input channels.
     out_channels : int
         Number of output channels.
+    time_emb_dim : int, optional
+        Dimension for time embedding injection.
     """
     def __init__(self, in_channels, out_channels, time_emb_dim=None):
         super().__init__()
@@ -79,7 +96,10 @@ class Down(nn.Module):
 
 class Up(nn.Module):
     """
-    Upscaling block: ConvTranspose + skip connection +DoubleConv
+    Upscaling block that restores spatial resolution using skip connections.
+
+    Performs a ConvTranspose2d, pads the result to match the skip connection dimensions (if necessary), and concatenates
+    feature maps before the `DoubleConv`.
 
     Parameters
     ----------
@@ -87,6 +107,8 @@ class Up(nn.Module):
         Number of input channels.
     out_channels : int
         Number of output channels.
+    time_emb_dim : int, optional
+        Dimension for time embedding injection.
     """
     def __init__(self, in_channels, out_channels, time_emb_dim=None):
         super().__init__()
@@ -131,7 +153,10 @@ class OutConv(nn.Module):
 
 class UNet(nn.Module):
     """
-    Flexible U-Net for SAR reconstruction
+    Flexible U-Net architecture for SAR reconstruction and diffusion.
+
+    The model dynamically adjusts its input layer based on whether it is operating in 'standard' mode (predicting $y$
+    from $x$) or 'diffusion' mode (predicting noise $\epsilon$ from a concatenated $x$ and $y_t$).
 
     Parameters
     ----------
@@ -139,8 +164,12 @@ class UNet(nn.Module):
         Number of input channels.
     out_channels : int
         Number of output channels.
+    base_channels : int, default=64
+        The number of feature channels in the first layer.
+    depth : int, default=4
+        The number of downsampling and upsampling levels.
     is_diffusion : bool
-        Transforms U-Net into diffusion if True.
+        If True, initializes time-embedding layers and adjusts the input layer to accept concatenated $x$ and $y_t$.
     """
     def __init__(self, in_channels: int, out_channels: int, base_channels: int = 64, depth: int = 4, is_diffusion: bool = False):
         super().__init__()
@@ -177,13 +206,19 @@ class UNet(nn.Module):
 
     def forward(self, x, t=None):
         """
+        Forward pass for the U-Net.
 
         Parameters
         ----------
         x : torch.Tensor
-            Input tensor.
-        t : torch.Tensor
-            Scalar timesteps (only required if is_diffusion=True).
+            Input tensor of shape (B, C, H, W).
+        t : torch.Tensor, optional
+            A tensor of timesteps (B,) used only if `is_diffusion` is True.
+
+        Returns
+        -------
+        torch.Tensor
+            The reconstructed SAR tensor or the predicted noise.
         """
         time_emb = self.time_mlp(t) if  (self.is_diffusion and t is not None) else None
         skips = []
