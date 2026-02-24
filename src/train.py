@@ -235,8 +235,14 @@ def train():
         test_loop = tqdm(test_loader, desc="Testing")
         for i, (x, y, _) in enumerate(test_loop):
             x, y = x.to(device), y.to(device)
-            outputs = model(x)
 
+            if is_diffusion:
+                y_t = torch.randn_like(y).to(device)
+                model_input = torch.cat([x, y_t], dim=1)
+                t = torch.zeros((x.shape[0],), device=device).long()
+                outputs = model(model_input, t)
+            else:
+                outputs = model(x)
             loss = criterion(outputs, y)
             test_loss += loss.item()
     av_test_loss = test_loss / len(test_loader)
