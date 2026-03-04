@@ -12,7 +12,7 @@ from tqdm import tqdm
 
 
 def tfm_dihedral(x, k):
-    """Strip-safe augmentations. Only allows flips/rotations that keep the 1024x240 aspect ratio.
+    """Strip-safe augmentations. Only allows flips/rotations that keep the rectangular aspect ratio.
 
     Parameters
     ----------
@@ -71,7 +71,6 @@ def _strip_crop(x, y, target_h, target_w):
     c, h, w = x.shape
 
     final_w = (min(target_w, w) // 16) * 16
-
     start_w = (w - final_w) // 2
 
     x = x.narrow(2, start_w, final_w)
@@ -253,6 +252,10 @@ if __name__ == "__main__":
     train_ds, val_ds, test_ds = build_complex_datasets_from_config("/shared/home/lvanderpeet/AE5822-Thesis/config.yaml")
     x, y, meta = train_ds[0]
     print(x.shape, y.shape, meta["incidence_angle"], meta["idx"])
+    x, y, meta = test_ds[0]
+    target_patch_id = meta["patch_id"]
+
+    print(f"Analyzing Patch ID: {target_patch_id}")
 
 
     # def check_shapes(ds, name):
