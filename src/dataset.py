@@ -47,10 +47,13 @@ def _normalize(x, y, global_max=4257):
     x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
     y = torch.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
 
-    x_norm = x / global_max
-    y_norm = y / global_max
+    x[0::2] = x[0::2] / global_max
+    y[0::2] = y[0::2] / global_max
 
-    return torch.clamp(x_norm, -1.0, 1.0), torch.clamp(y_norm, -1.0, 1.0)
+    x[1::2] = x[1::2] / np.pi
+    y[1::2] = y[1::2] / np.pi
+
+    return torch.clamp(x, -1.0, 1.0), torch.clamp(y, -1.0, 1.0)
 
 
 def _strip_crop(x, y, target_h, target_w):
@@ -158,8 +161,10 @@ class ComplexSARDataset(Dataset):
         if arr.ndim == 2:
             arr = arr[np.newaxis, ...]
 
-        real, imag = arr.real.astype(np.float32), arr.imag.astype(np.float32)
-        combined = np.stack([real, imag], axis=1).reshape(-1, arr.shape[-2], arr.shape[-1])
+        mag = np.abs(arr).astype(np.float32)
+        phase = np.angle(arr).astype(np.float32)
+
+        combined = np.stack([mag, phase], axis=1).reshape(-1, arr.shape[-2], arr.shape[-1])
 
         return torch.from_numpy(combined)
 
