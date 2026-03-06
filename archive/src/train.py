@@ -1,6 +1,8 @@
 import os
 import yaml
 import torch
+import pandas as pd
+import numpy as np
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from diff_utils import (
@@ -14,6 +16,7 @@ from diff_utils import (
 )
 from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR
 from dataset import build_complex_datasets_from_config
+from evaluation import SAREvaluator
 from models import UNet
 
 def train():
@@ -249,6 +252,51 @@ def train():
     print(f"Final test loss: {av_test_loss:.6f}")
 
     visualize_reconstruction(model, test_loader, device, epoch + 1, viz_dir=test_viz_dir, engine=engine, sa_index=cfg["data"]["subaperture_config"]["output_indices"])
+
+    evaluator = SAREvaluator(global_max=4257)
+    all_test_metrics = []
+
+    with torch.no_grad():
+        for i, (x, y, _) in enumerate(tqdm(test_loader, desc="Hypothesis Testing")):
+            x, y = x.to(device), y.to(device)
+
+            if is_diffusion:
+                cur_y = torch.randn_like(y)
+                for t_step in reversed(range(engine.num_steps)):
+                    t_batch = torch.full((x.shape[0],), t_step, device=device).long()
+                    model_input = torch.cat([x, cur_y], dim=1)
+                    pred_noise = model(model_input, t_batch)
+                    cur_y = engine.step(pred_noise, t_step, cur_y)
+                outputs = cur_y
+            else:
+                outputs = model(x)
+
+            batch_metrics = evaluator.evaluate_hypotheses(outputs, y)
+            all_test_metrics.extend(batch_metrics)
+
+    df_results = pd.DataFrame(all_test_metrics).dropna()
+    summary_mean = df_results.mean()
+    summary_sem = df_results.sem()
+    ci_95 = 1.96 * summary_sem
+
+    hypothesis_map = [
+        ("H1 (Azimuth Width)", "h1_azimuth_err"),
+        ("H2 (Range Width)", "h2_range_err"),
+        ("H3 (Intensity)", "h3_intensity_err"),
+        ("H3 (ENL/Speckle)", "h3_enl_err")
+    ]
+
+    for label, column in hypothesis_map:
+        mean_val = summary_mean[column]
+        upper_bound = mean_val + ci_95[column]
+
+        is_accepted = upper_bound <= 0.05
+        status_str = "PASSED" if is_accepted else "FAILED"
+
+        print(f"{label:<20} | {mean_val:>11.2%} | {upper_bound:>17.2%} | {status_str}")
+
+    results_out_path = os.path.join(run_dir, "hypothesis_testing_summary.csv")
+    df_results.to_csv(results_out_path, index=False)
 
 
 if __name__ == "__main__":

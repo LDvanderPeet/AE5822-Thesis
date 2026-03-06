@@ -1,0 +1,40 @@
+seed: 42  # Global random seed for reproducibility across dataloading and model init.
+
+data:
+  loader:
+    batch_size: 4  # Number of samples per optimization step.
+    num_workers: 0  # Number of worker processes used by PyTorch DataLoader.
+    pin_memory: false  # Pin CPU memory for faster transfer to GPU (usually true when training on CUDA).
+
+model:
+  in_channels: 2  # Channels in the conditional input x.
+  out_channels: 2  # Channels in the reconstruction target y.
+  num_timesteps: 1000  # Number of diffusion denoising steps.
+  schedule: linear  # Beta schedule variant for the forward process.
+  unet:
+    dim: 48  # Base UNet width. Previous setting was 64; 48 reduces parameter count to about half (30M instead of 55M).
+    dim_mults: [1, 2, 4, 8]  # Width multipliers per UNet level.
+    channels: 4  # Input channels to UNet; for conditional concat this is usually in_channels + out_channels.
+    out_dim: 2  # UNet output channels; should match model.out_channels.
+
+optimization:
+  lr: 0.0001  # AdamW learning rate.
+  reduce_lr_on_plateau:
+    factor: 0.5  # Multiplicative LR drop factor when metric plateaus.
+    patience: 10  # Number of bad validation epochs before LR is reduced.
+
+trainer:
+  max_epochs: 100  # Total number of training epochs.
+  accelerator: auto  # Lightning accelerator selection: auto/cpu/gpu/mps.
+  devices: 1  # Number of devices to use (e.g. 1 for single GPU/CPU process).
+  precision: 32  # Numeric precision used by Lightning.
+  log_every_n_steps: 10  # Logging frequency in training steps.
+  enable_checkpointing: false  # Disable Lightning checkpoint callback by default.
+  limit_val_batches: 50  # Validation coverage per epoch. Float in [0,1] or int number of batches.
+
+logging:
+  wandb:
+    project: dif_img_rec  # Weights & Biases project name.
+    name: null  # Optional run name; null lets W&B auto-generate one.
+    save_dir: logs  # Local directory used by W&B for run files.
+    log_model: false  # Whether to upload model artifacts automatically.

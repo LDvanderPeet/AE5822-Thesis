@@ -210,9 +210,10 @@ if __name__ == "__main__":
     # inspect_dataset("/shared/home/lvanderpeet/AE5822-Thesis/config.yaml")
     config_path = "/shared/home/lvanderpeet/AE5822-Thesis/config.yaml"
     root_dir = "/shared/home/lvanderpeet/AE5822-Thesis/data"
-    patch_id = "0000478"
-    pol = ["vv"]
+    patch_id = "0003248"
+    pol = "vv"
     sub_folder = "sub_3"
     # plot_patch_dist(root_dir, patch_id, pol, sub_folder)
-    # plot_patch(root_dir, patch_id, pol, sub_folder)
-    plot_global_stats(root_dir, pol, sub_folder)
+    plot_patch(root_dir, patch_id, pol, sub_folder)
+
+    # plot_global_stats(root_dir, pol, sub_folder)

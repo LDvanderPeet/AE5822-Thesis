@@ -8,6 +8,7 @@ import numpy as np
 import csv
 from datetime import datetime
 import pandas as pd
+import seaborn as sns
 
 
 class DiffusionEngine:
@@ -135,8 +136,9 @@ def setup_run_directory(config_path):
         cfg = yaml.safe_load(f)
 
     run_name = cfg["save"]["name"]
+    mode = cfg["save"]["mode"]
     time_stamp = datetime.now().strftime("%m%d_%H%M")
-    run_folder_name = f"{time_stamp}-run-{run_name}"
+    run_folder_name = f"{time_stamp}-run-{run_name}-mode-{mode}"
 
     base_project_dir = os.path.dirname(config_path)
     all_runs_dir = os.path.join(base_project_dir, "runs")
@@ -222,15 +224,14 @@ def visualize_reconstruction(model, val_loader, device, epoch, viz_dir, engine=N
         Specific dataset index to visualize for consistency.
     """
     model.eval()
-
     dataset = val_loader.dataset
+
+    if sample_idx >= len(dataset):
+        sample_idx = 0
+    else:
+        sample_idx = sample_idx
+
     x, y, meta = dataset[sample_idx]
-
-    # try:
-    #     x, y, meta = next(iter(val_loader))
-    # except StopIteration:
-    #     return
-
     x, y = x.unsqueeze(0).to(device), y.unsqueeze(0).to(device)
 
     if engine is not None:
@@ -246,19 +247,9 @@ def visualize_reconstruction(model, val_loader, device, epoch, viz_dir, engine=N
     else:
         output = model(x)
 
-    # def to_mag(tensor):
-    #     re = tensor[:, 0::2, ...]
-    #     im = tensor[:, 1::2, ...]
-    #     mag = torch.sqrt(re**2 + im**2)
-    #     return mag[0,0].cpu().numpy()
-
     gt_mag = get_physical_magnitude(y, global_max)[0, 0].cpu().numpy()
     pred_mag = get_physical_magnitude(output, global_max)[0, 0].cpu().numpy()
     err_mag = np.abs(gt_mag - pred_mag)
-
-    # gt_mag = to_mag(y)
-    # pred_mag = to_mag(output)
-    # err_mag = np.abs(gt_mag - pred_mag)
 
     fig, axes = plt.subplots(1, 3, figsize=(15, 10))
     fig.suptitle(f"Epoch {epoch} - Subaperture {sa_index} Analysis", fontsize=16)
@@ -386,6 +377,55 @@ def get_criterion(cfg):
 
     else:
         raise ValueError(f"Unknown loss function: {loss_type}")
+
+
+def plot_intensity_pdf_comparison(pred_tensor, gt_tensor, evaluator, epoch, save_path=None):
+    """
+    Generates a PDF comparison plot for a validation batch.
+
+    Parameters
+    ----------
+    pred_tensor : torch.Tensor
+        Model output (B, C, H, W)
+    gt_tensor : torch.Tensor
+        Ground truth (B, C, H, W)
+    evaluator : SAREvaluator
+        Instance of your evaluator to handle complex conversion and scaling.
+    epoch : int
+        Current epoch for the plot title.
+    """
+    pred_c = evaluator.to_complex(pred_tensor)
+    gt_c = self_c = evaluator.to_complex(gt_tensor)
+
+    pred_int = np.abs(pred_c).flatten() ** 2
+    gt_int = np.abs(gt_c).flatten() ** 2
+
+    pred_int = pred_int[pred_int > 1e-6]
+    gt_int = gt_int[gt_int > 1e-6]
+
+    pred_db = 10 * np.log10(pred_int)
+    gt_db = 10 * np.log10(gt_int)
+
+    # 4. Create Plot
+    fig, ax = plt.subplots(figsize=(8, 5))
+
+    sns.kdeplot(gt_db, ax=ax, label='Ground Truth', color='black', linestyle='--', linewidth=1.5)
+    sns.kdeplot(pred_db, ax=ax, label='Reconstruction', color='#00a6d6', linewidth=2)
+
+    ax.set_title(f"Intensity PDF Comparison - Epoch {epoch}")
+    ax.set_xlabel("Intensity [dB]")
+    ax.set_ylabel("Density")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, dpi=150)
+        plt.close(fig)
+        return None
+
+    return fig
 
 
 

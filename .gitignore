@@ -1,0 +1,10 @@
+runs/
+dataset/
+*.pth
+*.zarr
+*.npy
+*.png
+
+__pycache__/
+.idea/
+.venv/

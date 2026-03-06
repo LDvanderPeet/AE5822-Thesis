@@ -131,17 +131,24 @@ class ComplexSARDataset(Dataset):
                 if os.path.exists(json_path) and os.path.exists(zarr_path):
                     self.patch_ids.append(pid)
 
-        n = len(self.patch_ids)
+        if cfg["save"]["mode"] == "overfit":
+            num_samples = 8
+            self.patch_ids = self.patch_ids[:num_samples]
+            print(f"Overfitting on {len(self.patch_ids)} patches...")
 
-        if split == 'train':
-            self.patch_ids = self.patch_ids[:int(0.8 *  n)]
-        elif split == 'valid':
-            self.patch_ids = self.patch_ids[int(0.8 * n):int(0.9 * n)]
-        elif split == 'test':
-            self.patch_ids = self.patch_ids[int(0.9 * n):]
         else:
-            raise ValueError(f"Invalid split name: '{split}'. Expected 'train', 'valid', or 'test'.")
-        print(f"Split {split}: Found {len(self.patch_ids)} valid patched containing {self.requested_pols}")
+
+            n = len(self.patch_ids)
+
+            if split == 'train':
+                self.patch_ids = self.patch_ids[:int(0.8 *  n)]
+            elif split == 'valid':
+                self.patch_ids = self.patch_ids[int(0.8 * n):int(0.9 * n)]
+            elif split == 'test':
+                self.patch_ids = self.patch_ids[int(0.9 * n):]
+            else:
+                raise ValueError(f"Invalid split name: '{split}'. Expected 'train', 'valid', or 'test'.")
+            print(f"Split {split}: Found {len(self.patch_ids)} valid patched containing {self.requested_pols}")
 
     def __len__(self):
         """Returns the total number of patches in the current split."""

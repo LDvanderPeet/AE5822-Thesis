@@ -26,13 +26,15 @@ data:
 
 model:
   name: "unet"
+  diffusion: True
   in_channels: 4
   out_channels: 2
   base_channels: 128
   depth: 4
+  num_steps: 1000
 
 training:
-  epochs: 50
+  epochs: 100
   learning_rate: 0.0001
   optimizer: "adamw"
   weight_decay: 0.01
@@ -41,15 +43,16 @@ training:
   checkpoint_interval: 5
   loss_function: "complex_magnitude"
   loss_params:
-      alpha: 0.7
+      alpha: 0.5
   scheduler:
-    patience: 1
+    patience: 5
     factor: 0.5
-    min_lr: 0.00001
+    min_lr: 0.000001
   early_stopping:
-    patience: 10
-    min_delta: 0.0001
+    patience: 15
+    min_delta: 0.00001
 
 save:
-  name: "CosineAnnealingLR"
+  mode: "overfit"
+  name: "DiffusionModel"
 
