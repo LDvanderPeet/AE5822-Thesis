@@ -111,8 +111,8 @@ class PixelDiffusionConditional(pl.LightningModule):
     def _to_plot_image(self, tensor):
         """Convert CHW tensor to a matplotlib-friendly image array."""
         image = tensor.detach().float().cpu().clamp(0, 1)
-        if image.shape[0] >= 3:
-            return image[:3].permute(1, 2, 0).numpy(), None
+        # if image.shape[0] >= 3:
+            # return image[:3].permute(1, 2, 0).numpy(), None
         return image[0].numpy(), 'gray'
 
     def _compute_reconstruction_metrics(self, pred_batch, target_batch):

@@ -20,8 +20,8 @@ What already works:
 
 What is still placeholder:
 - Dataset/data module in [`data/`](/work/code/dif_img_rec/data)
-  - currently returns random `(x, y)` with shape `(2, 128, 128)`
-  - fixed length `1000`
+    - defaults to random `(x, y)` with shape `(2, 128, 128)` and fixed length `(1000)`
+    - can now auto-switch to the SAR loader in `data/sardataset.py` when `data.root_dir` and `data.subaperture_config` are provided in config
 
 ## 1. Install Requirements
 

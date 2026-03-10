@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from typing import Optional
 
 import pytorch_lightning as pl
@@ -9,15 +10,17 @@ from .dataset import PairedImageDataset
 
 
 class PairedDataModule(pl.LightningDataModule):
-    """Barebones LightningDataModule for paired (x, y) samples."""
+    """LightningDataModule for paired (x, y) samples."""
 
     def __init__(
         self,
+        config: Optional[dict] = None,
         batch_size: int = 4,
         num_workers: int = 0,
         pin_memory: bool = False,
     ) -> None:
         super().__init__()
+        self.config = config or {}
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.pin_memory = pin_memory
@@ -31,6 +34,7 @@ class PairedDataModule(pl.LightningDataModule):
         data_cfg = config.get("data", {})
         loader_cfg = data_cfg.get("loader", {})
         return cls(
+            config=config,
             batch_size=loader_cfg.get("batch_size", 4),
             num_workers=loader_cfg.get("num_workers", 0),
             pin_memory=loader_cfg.get("pin_memory", False),
@@ -40,13 +44,21 @@ class PairedDataModule(pl.LightningDataModule):
         # Intentionally empty: implement download/indexing logic later.
         return None
 
+    def _build_dataset(self, split: str, da: bool) -> PairedImageDataset:
+        """Build dataset with compatibility for older PairedImageDataset signatures."""
+        init_sig = inspect.signature(PairedImageDataset.__init__)
+        if "da" in init_sig.parameters:
+            return PairedImageDataset(config=self.config, split=split, da=da)
+        return PairedImageDataset(config=self.config, split=split)
+
+
     def setup(self, stage: Optional[str] = None) -> None:
         if stage in (None, "fit"):
-            self.train_dataset = PairedImageDataset()
-            self.val_dataset = PairedImageDataset()
+            self.train_dataset = PairedImageDataset(config=self.config, split="train", da=True)
+            self.val_dataset = PairedImageDataset(config=self.config, split="valid", da=False)
 
         if stage in (None, "test"):
-            self.test_dataset = PairedImageDataset()
+            self.test_dataset = PairedImageDataset(config=self.config, split="test", da=False)
 
     def train_dataloader(self) -> DataLoader:
         if self.train_dataset is None:

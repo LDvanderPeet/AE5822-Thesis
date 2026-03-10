@@ -47,8 +47,13 @@ def _normalize(x, y, global_max=4257):
     x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
     y = torch.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
 
-    x[0::2] = x[0::2] / global_max
-    y[0::2] = y[0::2] / global_max
+    denom = np.log1p(global_max)
+    x[0::2] = torch.log1p(x[0::2]) / denom
+    y[0::2] = torch.log1p(y[0::2]) / denom
+
+    ## Map [0, 1] to [-1, 1] for diffusion
+    x[0::2] = x[0::2] * 2.0 - 1.0
+    y[0::2] = y[0::2] * 2.0 - 1.0
 
     x[1::2] = x[1::2] / np.pi
     y[1::2] = y[1::2] / np.pi
@@ -131,7 +136,8 @@ class ComplexSARDataset(Dataset):
                 if os.path.exists(json_path) and os.path.exists(zarr_path):
                     self.patch_ids.append(pid)
 
-        if cfg["save"]["mode"] == "overfit":
+        save_mode = cfg.get("logging", {}).get("mode", "train")
+        if save_mode == "overfit":
             num_samples = 8
             self.patch_ids = self.patch_ids[:num_samples]
             print(f"Overfitting on {len(self.patch_ids)} patches...")
@@ -222,8 +228,11 @@ class ComplexSARDataset(Dataset):
 
         x, y = _normalize(x, y)
 
-        target_height = self.cfg["data"]["train"]["image_height"]
-        target_width = self.cfg["data"]["train"]["image_width"]
+        data_cfg = self.cfg.get("data", {})
+        train_cfg = data_cfg.get("data", {})
+        target_height = data_cfg.get("image_height", train_cfg.get("image_height", x.shape[-2]))
+        target_width = data_cfg.get("image_width", train_cfg.get("image_width", x.shape[-1]))
+
         x, y = _strip_crop(x, y, target_height, target_width)
 
         if self.da:
@@ -261,7 +270,7 @@ def build_complex_datasets_from_config(config_path: str):
     return train_ds, val_ds, test_ds
 
 if __name__ == "__main__":
-    train_ds, val_ds, test_ds = build_complex_datasets_from_config("/shared/home/lvanderpeet/AE5822-Thesis/config.yaml")
+    train_ds, val_ds, test_ds = build_complex_datasets_from_config("/shared/home/lvanderpeet/AE5822-Thesis/configs/config.yaml")
     x, y, meta = train_ds[0]
     print(x.shape, y.shape, meta["incidence_angle"], meta["idx"])
     x, y, meta = test_ds[0]
