@@ -16,7 +16,7 @@ class DenoisingDiffusionProcess(nn.Module):
     
     def __init__(self,
                  generated_channels=3,              
-                 loss_fn=F.mse_loss,
+                 loss_fn=None,
                  schedule='linear',
                  noise_offset=0.0,
                  num_timesteps=1000,
@@ -31,7 +31,7 @@ class DenoisingDiffusionProcess(nn.Module):
         # Basic Params
         self.generated_channels=generated_channels
         self.num_timesteps=num_timesteps
-        self.loss_fn=loss_fn
+        self.loss_fn=loss_fn if loss_fn is not None else self._mse_loss
         
         # Forward Process Used for Training
         self.forward_process=GaussianForwardProcess(num_timesteps=self.num_timesteps,
@@ -105,7 +105,12 @@ class DenoisingDiffusionProcess(nn.Module):
         noise_hat = self.model(output_noisy, t) 
 
         # apply loss
-        return self.loss_fn(noise, noise_hat)
+        return self.loss_fn(noise, noise_hat, t)
+
+    @staticmethod
+    def _mse_loss(noise, noise_hat, t):
+        del t
+        return F.mse_loss(noise, noise_hat)
     
     
 class DenoisingDiffusionConditionalProcess(nn.Module):
@@ -113,7 +118,7 @@ class DenoisingDiffusionConditionalProcess(nn.Module):
     def __init__(self,
                  generated_channels=3,
                  condition_channels=3,
-                 loss_fn=F.mse_loss,
+                 loss_fn=None,
                  schedule='linear',
                  noise_offset=0.0,
                  num_timesteps=1000,
@@ -129,7 +134,7 @@ class DenoisingDiffusionConditionalProcess(nn.Module):
         self.generated_channels=generated_channels
         self.condition_channels=condition_channels
         self.num_timesteps=num_timesteps
-        self.loss_fn=loss_fn
+        self.loss_fn=loss_fn if loss_fn is not None else self._mse_loss
         
         # Forward Process
         self.forward_process=GaussianForwardProcess(num_timesteps=self.num_timesteps,
@@ -206,4 +211,9 @@ class DenoisingDiffusionConditionalProcess(nn.Module):
         noise_hat = self.model(model_input, t) 
             
         # apply loss
-        return self.loss_fn(noise, noise_hat)
+        return self.loss_fn(noise, noise_hat, t)
+
+    @staticmethod
+    def _mse_loss(noise, noise_hat, t):
+        del t
+        return F.mse_loss(noise, noise_hat)

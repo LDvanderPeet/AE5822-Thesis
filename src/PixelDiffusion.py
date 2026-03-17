@@ -1,10 +1,37 @@
 import pytorch_lightning as pl
 import torch
 import torch.nn.functional as F
+from torchmetrics.functional.image import multiscale_structural_similarity_index_measure
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 
 from .DenoisingDiffusionProcess import *
+
+
+
+def _build_hybrid_diffusion_loss(num_timesteps):
+    """Create timestep-aware hybrid loss for diffusion training."""
+    denom = max(float(num_timesteps - 1, 1.0))
+
+    def _hybrid_diffusion_loss(noise, noise_hat, t):
+        mse_per_sample = F.mse_loss(noise_hat, noise, reduction='none').flatten(1).mean(dim=1)
+
+        noise_01 = (noise + 1.0) * 0.5
+        noise_hat_01 = (noise_hat + 1.0) * 0.5
+        ms_ssim = multiscale_structural_similarity_index_measure(
+            noise_hat_01,
+            noise_hat_01,
+            data_range=1.0,
+            reduction='none'
+        )
+
+        t_norm = t.float() / denom
+        ms_ssim_weight = 1.0 - t_norm
+        hybrid_per_sample = (1.0 - ms_ssim_weight) * mse_per_sample + ms_ssim_weight * (1.0 - ms_ssim)
+        return hybrid_per_sample.mean()
+
+    return _build_hybrid_diffusion_loss
+
 
 class PixelDiffusionConditional(pl.LightningModule):
     """Conditional pixel-space diffusion Lightning module.
@@ -19,6 +46,7 @@ class PixelDiffusionConditional(pl.LightningModule):
                  num_timesteps=1000,
                  schedule='linear',
                  noise_offset=0.0,
+                 loss_fn='mse',
                  model_dim=64,
                  model_dim_mults=(1,2,4,8),
                  model_channels=None,
@@ -31,9 +59,18 @@ class PixelDiffusionConditional(pl.LightningModule):
         self.lr_scheduler_factor=lr_scheduler_factor
         self.lr_scheduler_patience=lr_scheduler_patience
         
+        self.loss_name = loss_fn.lower()
+        if self.loss_name == 'mse':
+            resolved_loss_fn = None
+        elif self.loss_name == 'hybrid':
+            resolved_loss_fn = _build_hybrid_diffusion_loss(num_timesteps)
+        else:
+            raise ValueError(f"Unsupported model.loss_fn {self.loss_name}. Expected one of 'mse', 'hybrid'.")
+
         # Core conditional diffusion process used by training, validation, and prediction.
         self.model=DenoisingDiffusionConditionalProcess(generated_channels=generated_channels,
                                                         condition_channels=condition_channels,
+                                                        loss_fn=resolved_loss_fn,
                                                         schedule=schedule,
                                                         noise_offset=noise_offset,
                                                         num_timesteps=num_timesteps,
