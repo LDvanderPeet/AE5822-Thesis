@@ -6,6 +6,7 @@ from pathlib import Path
 import pytorch_lightning as pl
 import torch
 import yaml
+from pytorch_lightning.callbacks import LearningRateMonitor
 from pytorch_lightning.loggers import WandbLogger
 
 from data import PairedDataModule
@@ -82,6 +83,7 @@ def main() -> None:
         log_model=wandb_cfg.get("log_model", False),
     )
     # Trainer controls loop behavior, device placement, precision, and logging cadence.
+    lr_monitor = LearningRateMonitor(logging_interval="step")
     trainer = pl.Trainer(
         max_epochs=trainer_cfg.get("max_epochs", 1),
         accelerator=trainer_cfg.get("accelerator", "auto"),
@@ -91,6 +93,7 @@ def main() -> None:
         enable_checkpointing=trainer_cfg.get("enable_checkpointing", False),
         limit_val_batches=limit_val_batches,
         logger=wandb_logger,
+        callbacks=[lr_monitor],
     )
 
     # Starts the training/validation loop.
