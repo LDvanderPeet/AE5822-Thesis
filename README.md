@@ -90,6 +90,7 @@ model:
   out_channels: 2
   num_timesteps: 1000
   schedule: linear
+  noise_offset: 0.0
   unet:
     dim: 48
     dim_mults: [1, 2, 4, 8]
@@ -100,6 +101,7 @@ model:
 Notes:
 - `unet.channels` should usually be `in_channels + out_channels` for conditional concat input.
 - `unet.out_dim` should match `out_channels`.
+- `noise_offset` adds an optional low-frequency offset term to training noise (set `0.0` to disable).
 - Smaller model: reduce `unet.dim` (for example `48` instead of `64`).
 - Current downsized setup reduces the UNet from about `55M` to about `32M` parameters
   (mainly by lowering base width via `unet.dim` and using the configured channel sizes).

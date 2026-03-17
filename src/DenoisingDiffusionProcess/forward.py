@@ -48,12 +48,14 @@ class GaussianForwardProcess(ForwardModel):
     
     def __init__(self,
                  num_timesteps=1000,
-                 schedule='linear'
+                 schedule='linear',
+                 noise_offset=0.0
                 ):
         
         super().__init__(num_timesteps=num_timesteps,
                          schedule=schedule
                         )
+        self.noise_offset = noise_offset
         
         # get process parameters
         self.register_buffer('betas',get_beta_schedule(self.schedule,self.num_timesteps))
@@ -78,6 +80,12 @@ class GaussianForwardProcess(ForwardModel):
         std=self.alphas_one_minus_cumprod_sqrt[t].view(b,1,1,1)
         
         noise=torch.randn_like(x_0)
+        if self.noise_offset > 0.0:
+            noise = noise + self.noise_offset * torch.randn(
+                (b, x_0.shape[1], 1, 1),
+                device=x_0.device,
+                dtype=x_0.dtype,
+            )
         output=mean+std*noise        
         
         if not return_noise:
@@ -97,7 +105,7 @@ class GaussianForwardProcess(ForwardModel):
         mean=self.alphas_sqrt[t]*x_t
         std=self.betas_sqrt[t]
         
-        noise=torch.randn_like(x_0)
+        noise=torch.randn_like(x_t)
         output=mean+std*noise        
         
         if not return_noise:

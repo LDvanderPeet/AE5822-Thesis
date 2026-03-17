@@ -18,6 +18,7 @@ class DenoisingDiffusionProcess(nn.Module):
                  generated_channels=3,              
                  loss_fn=F.mse_loss,
                  schedule='linear',
+                 noise_offset=0.0,
                  num_timesteps=1000,
                  sampler=None,
                  model_dim=64,
@@ -34,7 +35,8 @@ class DenoisingDiffusionProcess(nn.Module):
         
         # Forward Process Used for Training
         self.forward_process=GaussianForwardProcess(num_timesteps=self.num_timesteps,
-                                                    schedule=schedule)
+                                                    schedule=schedule,
+                                                    noise_offset=noise_offset)
         if model_channels is None:
             model_channels=self.generated_channels
         if model_out_dim is None:
@@ -113,6 +115,7 @@ class DenoisingDiffusionConditionalProcess(nn.Module):
                  condition_channels=3,
                  loss_fn=F.mse_loss,
                  schedule='linear',
+                 noise_offset=0.0,
                  num_timesteps=1000,
                  sampler=None,
                  model_dim=64,
@@ -130,7 +133,8 @@ class DenoisingDiffusionConditionalProcess(nn.Module):
         
         # Forward Process
         self.forward_process=GaussianForwardProcess(num_timesteps=self.num_timesteps,
-                                                    schedule=schedule)
+                                                    schedule=schedule,
+                                                    noise_offset=noise_offset)
         
         # Neural Network Backbone
         if model_channels is None:

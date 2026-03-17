@@ -1,31 +1,38 @@
 seed: 42  # Global random seed for reproducibility across dataloading and model init.
 
 data:
-  root_dir: "/shared/home/lvanderpeet/AE5822-Thesis/dataset/"
+  root_dir: "/shared/home/lvanderpeet/AE5822-Thesis/dataset/archive"
   image_height: 1024
   image_width: 240
+  global_max: 4257
   subaperture_config:
-   input_indices: [2, 3]
-   output_indices: [1]
-   active_polarizations: ["vv"] # retrieves only these polarizations ("vv", "vh", "hv", "hh")
+   input_indices: [1, 3]
+   output_indices: [2]
+   active_polarizations: ["VV"] # retrieves only these polarizations ("vv", "vh", "hv", "hh")
   loader:
     batch_size: 4  # Number of samples per optimization step.
-    num_workers: 8  # Number of worker processes used by PyTorch DataLoader.
+    num_workers: 4  # Number of worker processes used by PyTorch DataLoader.
     pin_memory: false  # Pin CPU memory for faster transfer to GPU (usually true when training on CUDA).
+  split:
+    train: 0.9
+    valid: 0.05
+    test: 0.05
 
 model:
-  in_channels: 4  # Channels in the conditional input x.
-  out_channels: 2  # Channels in the reconstruction target y.
+  in_channels: 2  # Channels in the conditional input x.
+  out_channels: 1  # Channels in the reconstruction target y.
   num_timesteps: 1000  # Number of diffusion denoising steps.
-  schedule: linear  # Beta schedule variant for the forward process.
+  schedule: cosine  # Beta schedule variant for the forward process.
+  loss_fn: hybrid # 'mse' for classic DDPM loss, 'hybrid' to blend L2 (high t) with MS-SSIM (low t)
+  noise_offset: 0.1
   unet:
     dim: 48  # Base UNet width. Previous setting was 64; 48 reduces parameter count to about half (30M instead of 55M).
     dim_mults: [1, 2, 4, 8]  # Width multipliers per UNet level.
-    channels: 6  # Input channels to UNet; for conditional concat this is usually in_channels + out_channels.
-    out_dim: 2  # UNet output channels; should match model.out_channels.
+    channels: 3  # Input channels to UNet; for conditional concat this is usually in_channels + out_channels.
+    out_dim: 1  # UNet output channels; should match model.out_channels.
 
 optimization:
-  lr: 0.0001  # AdamW learning rate.
+  lr: 0.00005  # AdamW learning rate.
   reduce_lr_on_plateau:
     factor: 0.5  # Multiplicative LR drop factor when metric plateaus.
     patience: 10  # Number of bad validation epochs before LR is reduced.
@@ -34,7 +41,7 @@ trainer:
   max_epochs: 100  # Total number of training epochs.
   accelerator: auto  # Lightning accelerator selection: auto/cpu/gpu/mps.
   devices: 1  # Number of devices to use (e.g. 1 for single GPU/CPU process).
-  precision: 32  # Numeric precision used by Lightning.
+  precision: 16  # Numeric precision used by Lightning.
   log_every_n_steps: 10  # Logging frequency in training steps.
   enable_checkpointing: false  # Disable Lightning checkpoint callback by default.
   limit_val_batches: 50  # Validation coverage per epoch. Float in [0,1] or int number of batches.
@@ -42,7 +49,7 @@ trainer:
 logging:
   wandb:
     project: dif_img_rec  # Weights & Biases project name.
-    name: sub_1_test  # Optional run name; null lets W&B auto-generate one.
+    name: new_data_test  # Optional run name; null lets W&B auto-generate one.
     save_dir: logs  # Local directory used by W&B for run files.
     log_model: false  # Whether to upload model artifacts automatically.
   mode: train

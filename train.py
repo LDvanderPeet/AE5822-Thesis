@@ -56,6 +56,7 @@ def main() -> None:
         generated_channels=model_cfg.get("out_channels", 2),
         num_timesteps=model_cfg.get("num_timesteps", 1000),
         schedule=model_cfg.get("schedule", "linear"),
+        noise_offset=model_cfg.get("noise_offset", 0),
         model_dim=unet_cfg.get("dim", 64),
         model_dim_mults=tuple(unet_cfg.get("dim_mults", [1, 2, 4, 8])),
         model_channels=unet_cfg.get("channels"),
