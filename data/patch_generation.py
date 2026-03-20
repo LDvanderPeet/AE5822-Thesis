@@ -1,212 +1,235 @@
-import argparse
-import csv
-import glob
+#!/usr/bin/env python3
 import os
+import glob
+import argparse
+from itertools import product
 
 import h5py
 import numpy as np
-from tqdm import tqdm
+import torch
+from joblib import Parallel, delayed
+from safetensors.torch import save_file
+
+SUFFIXES = ["", "_SA1", "_SA2", "_SA3"]
+POLS = ["VV", "VH"]
 
 
-def _compute_patch_starts(length, patch_size, stride):
-    """Compute start indices that tile an axis with overlap and include the trailing edge."""
-    if length < patch_size:
-        return []
-
-    starts = list(range(0, length - patch_size + 1, stride))
-    last_valid = length - patch_size
-    if starts[-1] != last_valid:
-        starts.append(last_valid)
-    return starts
+def iter_h5_files(root_dir, recursive=True):
+    pattern = "**/*.h5" if recursive else "*.h5"
+    return sorted(glob.glob(os.path.join(root_dir, pattern), recursive=recursive))
 
 
-def crop_h5_dataset_to_overlapping_patches(
-    input_root,
-    output_root,
-    patch_size=128,
-    overlap=64,
-    overwrite=False,
-    manifest_name="patch_manifest.csv",
-    ref_band="bands/i_VV",
-):
-    """Create overlapping H5 patches and a CSV manifest describing them."""
-    if overlap >= patch_size:
-        raise ValueError("`overlap` must be smaller than `patch_size`.")
+def get_hw_from_h5(h5_path, group):
+    with h5py.File(h5_path, "r") as f:
+        g = f[group]
+        for ref in ["i_VV", "i_VH"]:
+            if ref in g:
+                return g[ref].shape
+        for k in g.keys():
+            obj = g[k]
+            if isinstance(obj, h5py.Dataset) and obj.ndim == 2:
+                return obj.shape
+    raise RuntimeError(f"Could not infer (H, W) from {h5_path}")
 
-    stride = patch_size - overlap
-    source_files = sorted(glob.glob(os.path.join(input_root, "**", "*.h5"), recursive=True))
 
-    if not source_files:
-        raise FileNotFoundError(f"No .h5 files found in {input_root}")
+def get_dataset_pairs(h5_file, group):
+    g = h5_file[group]
+    pairs = []
+    for sfx in SUFFIXES:
+        for pol in POLS:
+            i_name = f"i_{pol}{sfx}"
+            q_name = f"q_{pol}{sfx}"
+            if i_name not in g or q_name not in g:
+                raise KeyError(f"Missing {group}/{i_name} or {group}/{q_name}")
+            pairs.append((i_name, q_name, g[i_name], g[q_name]))
+    return pairs
 
-    os.makedirs(output_root, exist_ok=True)
-    manifest_path = os.path.join(output_root, manifest_name)
-    if os.path.exists(manifest_path) and not overwrite:
-        raise FileExistsError(
-            f"Manifest already exists at {manifest_path}. Use overwrite=True to replace it."
+
+def get_block_coords_from_shape(h, w, block_size):
+    h_coords = np.arange(0, h, block_size, dtype=int)
+    w_coords = np.arange(0, w, block_size, dtype=int)
+    return list(product(h_coords, w_coords))
+
+
+def read_complex_block(dataset_pairs, h0, w0, bh, bw):
+    chans = []
+    for _, _, ds_i, ds_q in dataset_pairs:
+        i = ds_i[h0:h0 + bh, w0:w0 + bw].astype(np.float32, copy=False)
+        q = ds_q[h0:h0 + bh, w0:w0 + bw].astype(np.float32, copy=False)
+        chans.append(i)
+        chans.append(q)
+        # [I_vv, Q_vv, I_vh, Q_vh, I_vv_sa1, Q_vv_sa1...]
+    return np.stack(chans, axis=0).astype(np.float32, copy=False)
+
+
+def process_one_h5(h5_path, in_dir, out_dir, patch_size, stride, group, zero_thr, ratio_thr, block_size):
+    tile_name = os.path.splitext(os.path.basename(h5_path))[0]
+
+    # Product name = parent folder relative to input root
+    rel_dir = os.path.relpath(os.path.dirname(h5_path), in_dir)
+    product_name = rel_dir.split(os.sep)[0]
+
+    product_out_dir = os.path.join(out_dir, product_name)
+    os.makedirs(product_out_dir, exist_ok=True)
+
+    try:
+        H, W = get_hw_from_h5(h5_path, group)
+        block_coords = get_block_coords_from_shape(H, W, block_size)
+
+        n_total = 0
+        n_saved = 0
+        n_skipped = 0
+
+        with h5py.File(h5_path, "r") as f:
+            dataset_pairs = get_dataset_pairs(f, group)
+
+            for bh0, bw0 in block_coords:
+                bh = min(block_size, H - bh0)
+                bw = min(block_size, W - bw0)
+
+                # Keep only full patches inside the current block
+                bh = (bh // patch_size) * patch_size
+                bw = (bw // patch_size) * patch_size
+
+                if bh < patch_size or bw < patch_size:
+                    continue
+
+                block = read_complex_block(dataset_pairs, bh0, bw0, bh, bw)
+
+                for h1 in range(0, bh - patch_size + 1, stride):
+                    for w1 in range(0, bw - patch_size + 1, stride):
+                        n_total += 1
+
+                        x = block[:, h1:h1 + patch_size, w1:w1 + patch_size]
+
+                        # Filter based on zeros in channel 0 (VV original)
+                        if ratio_thr is not None:
+                            intensity_vv = x[0] ** 2 + x[1] ** 2
+                            no_data_ratio = float((intensity_vv <= zero_thr).sum() / (patch_size * patch_size))
+                            if no_data_ratio > ratio_thr:
+                                n_skipped += 1
+                                continue
+
+                        out_h = bh0 + h1
+                        out_w = bw0 + w1
+
+                        out_path = os.path.join(
+                            product_out_dir,
+                            f"{tile_name}__{out_h}_{out_w}.safetensors"
+                        )
+
+                        # .copy() avoids subtle issues with non-contiguous views
+                        x_t = torch.from_numpy(x.copy())
+                        save_file({"x": x_t}, out_path)
+                        n_saved += 1
+
+        return (h5_path, n_saved, n_total, n_skipped, None)
+
+    except Exception as e:
+        return (h5_path, 0, 0, 0, str(e))
+
+
+def _auto_workers():
+    env = os.environ.get("JOBS", "").strip()
+    if env:
+        try:
+            n = int(env)
+        except ValueError:
+            n = 0
+    else:
+        n = 0
+
+    if n <= 0:
+        n = os.cpu_count() or 1
+
+    return max(1, n)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--in_dir", required=True, help="Root directory containing .h5 files")
+    ap.add_argument("--out_dir", required=True, help="Output directory for .safetensors patches")
+    ap.add_argument("--patch_size", type=int, default=128, help="Patch size, default: 128")
+    ap.add_argument("--stride", type=int, default=None, help="Overlap stride, default: None")
+    ap.add_argument(
+        "--block_size",
+        type=int,
+        default=960,
+        help="Block size used for HDF5 reads. Recommended: multiple of patch_size, default: 960",
+    )
+    ap.add_argument("--group", default="bands", help="H5 group name, default: bands")
+    ap.add_argument("--no_recursive", action="store_true", help="Do not search recursively for .h5")
+    ap.add_argument(
+        "--ratio_thr",
+        type=float,
+        default=0.5,
+        help="Skip patch if zero ratio > ratio_thr in channel 0",
+    )
+    ap.add_argument(
+        "--zero_thr",
+        type=float,
+        default=0.0,
+        help="Consider values <= zero_thr as zero",
+    )
+    args = ap.parse_args()
+
+    if args.stride is None:
+        args.stride = args.patch_size
+
+    if args.block_size < args.patch_size:
+        raise ValueError("block_size must be >= patch_size")
+
+    if args.block_size % args.patch_size != 0:
+        raise ValueError("block_size should be a multiple of patch_size for best performance")
+
+    os.makedirs(args.out_dir, exist_ok=True)
+
+    h5_files = iter_h5_files(args.in_dir, recursive=(not args.no_recursive))
+    print(f"Found {len(h5_files)} .h5 files under: {args.in_dir}")
+    if not h5_files:
+        return
+
+    n_jobs = _auto_workers()
+    print(f"Using n_jobs={n_jobs}")
+    print(f"patch_size={args.patch_size}, block_size={args.block_size}")
+
+    results = Parallel(n_jobs=n_jobs, prefer="processes")(
+        delayed(process_one_h5)(
+            p,
+            args.in_dir,
+            args.out_dir,
+            args.patch_size,
+            args.stride,
+            args.group,
+            args.zero_thr,
+            args.ratio_thr,
+            args.block_size,
         )
-
-    manifest_rows = []
-    written_files = 0
-
-    for src_path in tqdm(source_files, desc="Tiling Full Scenes"):
-        with h5py.File(src_path, "r") as f_src:
-            dataset_paths = []
-
-            def _collect(name, obj):
-                if isinstance(obj, h5py.Dataset):
-                    dataset_paths.append(name)
-
-            f_src.visititems(_collect)
-
-            if not dataset_paths:
-                continue
-
-            ref_dataset_path = ref_band if ref_band in f_src else dataset_paths[0]
-            ref_shape = f_src[ref_dataset_path].shape
-            if len(ref_shape) < 2:
-                continue
-
-            height, width = ref_shape[-2], ref_shape[-1]
-            row_starts = _compute_patch_starts(height, patch_size, stride)
-            col_starts = _compute_patch_starts(width, patch_size, stride)
-
-            if not row_starts or not col_starts:
-                continue
-
-            rel_dir = os.path.relpath(os.path.dirname(src_path), input_root)
-            base_name = os.path.splitext(os.path.basename(src_path))[0]
-
-            for top in row_starts:
-                for left in col_starts:
-                    patch_name = f"{base_name}_y{top:04d}_x{left:04d}.h5"
-                    patch_dir = output_root if rel_dir == "." else os.path.join(output_root, rel_dir)
-                    os.makedirs(patch_dir, exist_ok=True)
-                    patch_path = os.path.join(patch_dir, patch_name)
-
-                    if os.path.exists(patch_path):
-                        if not overwrite:
-                            raise FileExistsError(
-                                f"Patch already exists at {patch_path}. Use overwrite=True to replace it."
-                            )
-                        os.remove(patch_path)
-
-                    ref_patch = f_src[ref_dataset_path][top:top + patch_size, left:left + patch_size]
-                    null_ratio = float(np.count_nonzero(ref_patch == 0) / ref_patch.size)
-
-                    with h5py.File(patch_path, "w") as f_patch:
-                        for dset_path in dataset_paths:
-                            src_dset = f_src[dset_path]
-                            data = src_dset[...]
-                            if data.ndim >= 2:
-                                slices = [slice(None)] * data.ndim
-                                slices[-2] = slice(top, top + patch_size)
-                                slices[-1] = slice(left, left + patch_size)
-                                data = data[tuple(slices)]
-
-                            dset = f_patch.create_dataset(dset_path, data=data)
-                            for attr_name, attr_val in src_dset.attrs.items():
-                                dset.attrs[attr_name] = attr_val
-
-                        for attr_name, attr_val in f_src.attrs.items():
-                            f_patch.attrs[attr_name] = attr_val
-
-                        f_patch.attrs["source_file"] = src_path
-                        f_patch.attrs["source_product"] = base_name
-                        f_patch.attrs["crop_top"] = int(top)
-                        f_patch.attrs["crop_left"] = int(left)
-                        f_patch.attrs["src_coords"] = [int(top), int(left)]
-                        f_patch.attrs["patch_size"] = int(patch_size)
-                        f_patch.attrs["overlap"] = int(overlap)
-                        f_patch.attrs["null_ratio"] = null_ratio
-
-                    manifest_rows.append({
-                        "patch_path": os.path.relpath(patch_path, output_root),
-                        "patch_name": patch_name,
-                        "source_file": src_path,
-                        "source_product": base_name,
-                        "ref_band": ref_dataset_path,
-                        "y": int(top),
-                        "x": int(left),
-                        "patch_size": int(patch_size),
-                        "overlap": int(overlap),
-                        "height": int(patch_size),
-                        "width": int(patch_size),
-                        "null_ratio": null_ratio,
-                    })
-                    written_files += 1
-
-    with open(manifest_path, "w", newline="") as manifest_file:
-        writer = csv.DictWriter(
-            manifest_file,
-            fieldnames=[
-                "patch_path",
-                "patch_name",
-                "source_file",
-                "source_product",
-                "ref_band",
-                "y",
-                "x",
-                "patch_size",
-                "overlap",
-                "height",
-                "width",
-                "null_ratio",
-            ],
-        )
-        writer.writeheader()
-        writer.writerows(manifest_rows)
-
-    print(
-        f"Done. Saved {written_files} cropped patches of "
-        f"{patch_size}x{patch_size} with overlap {overlap} to {output_root}. "
-        f"Manifest written to {manifest_path}."
+        for p in h5_files
     )
 
+    ok = [r for r in results if r[4] is None]
+    bad = [r for r in results if r[4] is not None]
 
-def tile_to_patch(
-    input_dir,
-    output_dir,
-    patch_size=128,
-    overlap=64,
-    overwrite=False,
-    manifest_name="patch_manifest.csv",
-    ref_band="bands/i_VV",
-):
-    """Compatibility wrapper around the overlapping H5 tiling utility."""
-    return crop_h5_dataset_to_overlapping_patches(
-        input_root=input_dir,
-        output_root=output_dir,
-        patch_size=patch_size,
-        overlap=overlap,
-        overwrite=overwrite,
-        manifest_name=manifest_name,
-        ref_band=ref_band,
-    )
+    total_saved = sum(r[1] for r in ok)
+    total_total = sum(r[2] for r in ok)
+    total_skipped = sum(r[3] for r in ok)
+
+    print("\nSummary")
+    print(f"  OK files:   {len(ok)}")
+    print(f"  Bad files:  {len(bad)}")
+    print(f"  Patches total candidates: {total_total}")
+    print(f"  Patches saved:            {total_saved}")
+    print(f"  Patches skipped:          {total_skipped}")
+    print(f"  Output dir: {args.out_dir}")
+
+    if bad:
+        print("\nErrors (first 20):")
+        for p, *_rest, err in bad[:20]:
+            print(f"  {p}: {err}")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Utilities for generating overlapping H5 patches.")
-    parser.add_argument("--crop", action="store_true", help="Create cropped overlapping patches from H5 files.")
-    parser.add_argument("--input-root", type=str, help="Root directory containing source .h5 files.")
-    parser.add_argument("--output-root", type=str, help="Destination directory for cropped .h5 patches.")
-    parser.add_argument("--patch-size", type=int, default=128, help="Square patch size in pixels.")
-    parser.add_argument("--overlap", type=int, default=64, help="Overlap with neighbouring patches in pixels.")
-    parser.add_argument("--overwrite", action="store_true", help="Overwrite already existing patch files.")
-    parser.add_argument("--manifest-name", type=str, default="patch_manifest.csv", help="CSV manifest filename.")
-    parser.add_argument("--ref-band", type=str, default="bands/i_VV", help="Reference band for tiling and no-data ratio.")
-    args = parser.parse_args()
+    main()
 
-    if args.crop:
-        if not args.input_root or not args.output_root:
-            raise ValueError("--input-root and --output-root are required when using --crop.")
 
-        crop_h5_dataset_to_overlapping_patches(
-            input_root=args.input_root,
-            output_root=args.output_root,
-            patch_size=args.patch_size,
-            overlap=args.overlap,
-            overwrite=args.overwrite,
-            manifest_name=args.manifest_name,
-            ref_band=args.ref_band,
-        )
