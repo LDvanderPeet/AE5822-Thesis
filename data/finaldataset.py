@@ -5,9 +5,10 @@ import numpy as np
 import json
 import zarr
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
 import glob
 import h5py
+from safetensors.torch import load_file
 
 
 
@@ -52,48 +53,16 @@ def _normalize(x, y, global_max=4257):
     x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
     y = torch.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
 
-    denom = np.log1p(global_max)
-    x[0::2] = torch.log1p(x[0::2]) / denom
-    y[0::2] = torch.log1p(y[0::2]) / denom
+    x = x / global_max
+    y = y / global_max
 
-    ## TODO: check normalization for phase information
-    x[1::2] = x[1::2] / np.pi
-    y[1::2] = y[1::2] / np.pi
-
-    return torch.clamp(x, -1.0, 1.0), torch.clamp(y, -1.0, 1.0)
+    return torch.clamp(x, 0.0, 1.0), torch.clamp(y, 0.0, 1.0)
 
 
-def _strip_crop(x, y, target_h=96, target_w=96):
+class SafetensorSARDataset(Dataset):
     """
-    Forces x and y to the exact same target dimensions.
-
-    Parameters
-    ----------
-    x : torch.Tensor
-        The data tensors.
-    y : torch.Tensor
-        The target tensors.
-    target_h : int
-        Target height of the SAR image.
-    target_w : int
-        Target width of the SAR image.
-    """
-    c, h, w = x.shape
-
-    start_h = max(0, (h - target_h) // 2)
-    start_w = max(0, (w - target_w) // 2)
-
-    x = x.narrow(1, start_h, target_h).narrow(2, start_w, target_w)
-    y = y.narrow(1, start_h, target_h).narrow(2, start_w, target_w)
-
-    return x, y
-
-
-class H5ComplexSARDataset(Dataset):
-    """
-    Adapted for the Tiled H5 dataset structure.
-    Structure: scene_folder/tile_name.h5
-    Bands: bands/i_VV, bands/q_VV, bands/i_VV_SA1, etc.
+    Optimized for the 16-channel .safetensor structure.
+    Splits data by PRODUCT to prevent spatial leakage.
     """
 
     def __init__(self, cfg, split='train', da=False):
@@ -101,93 +70,87 @@ class H5ComplexSARDataset(Dataset):
         self.da = da
         self.root_dir = cfg["data"]["root_dir"]
         self.requested_pols = [p.upper() for p in cfg["data"]["subaperture_config"]["active_polarizations"]]  # ["VV", "VH"]
+        self.input_indices = cfg["data"]["subaperture_config"].get("input_indices", [1, 3])
+        self.output_indices = cfg["data"]["subaperture_config"].get("output_indices", [2])
 
-        self.all_h5_files = sorted(glob.glob(os.path.join(self.root_dir, "**/*.h5"), recursive=True))
+        all_products = sorted([
+            d for d in os.listdir(self.root_dir)
+            if os.path.isdir(os.path.join(self.root_dir, d))
+        ])
 
-        if not self.all_h5_files:
-            raise FileNotFoundError(f"No .h5 files found in {self.root_dir}")
 
         self.split_info = cfg["data"]["split"]
         train_ratio = self.split_info.get("train", 0.8)
         valid_ratio = self.split_info.get("valid", 0.1)
 
-        n = len(self.all_h5_files)
+        n = len(all_products)
         random.seed(self.cfg.get("seed", 42))
-        random.shuffle(self.all_h5_files)
+        random.shuffle(all_products)
 
         train_end = int(n * train_ratio)
         valid_end = int(n * (train_ratio + valid_ratio))
 
         if split == 'train':
-            self.files = self.all_h5_files[:train_end]
+            selected_products = all_products[:train_end]
         elif split == 'valid':
-            self.files = self.all_h5_files[train_end:valid_end]
+            selected_products = all_products[train_end:valid_end]
         else:
-            self.files = self.all_h5_files[valid_end:]
+            selected_products = all_products[valid_end:]
 
-        print(f"Split {split}: {len(self.files)} tiles found.")
+        self.files = []
+        for prod in selected_products:
+            prod_path = os.path.join(self.root_dir, prod)
+            patches = [os.path.join(prod_path, f) for f in os.listdir(prod_path)]
+            self.files.extend(patches)
+
+        print(f"Split {split}: {len(selected_products)} products, {len(self.files)} patches found.")
+
 
     def __len__(self):
         return len(self.files)
 
-    def _get_band_name(self, comp, pol, sa_idx=None):
-        """Standardizes: bands/i_VV or bands/i_VV_SA1"""
-        if sa_idx is None:  # Full aperture
-            return f"bands/{comp}_{pol.upper()}"
-        return f"bands/{comp}_{pol.upper()}_SA{sa_idx}"
+
+    def _select_channels(self, full_tensor, indices):
+        """
+        Maps the logical indices (0=Full, 1=SA1, 2=SA2, 3=SA3)
+        and polarizations (VV, VH) to the 16 physical channels.
+        """
+        selected = []
+        for sa_idx in indices:
+            # Map logical SA index to the starting position in the 16-channel block
+            # 0->0, 1->4, 2->8, 3->12
+            base_offset = sa_idx * 4
+
+            if "VV" in self.requested_pols:
+                selected.append(full_tensor[base_offset: base_offset + 2])  # Grab I and Q
+            if "VH" in self.requested_pols:
+                selected.append(full_tensor[base_offset + 2: base_offset + 4])  # Grab I and Q
+
+        return torch.cat(selected, dim=0)
 
     def __getitem__(self, idx):
         file_path = self.files[idx]
 
-        with h5py.File(file_path, 'r') as f:
-            x_list, y_list = [], []
-            # Example: Input is SA1, SA2; Output is Full Aperture (target)
-            # Map your config indices to the SA labels in H5
-            # Assuming input_indices=[1, 2] means SA1, SA2
-            inputs = self.cfg["data"]["subaperture_config"]["input_indices"]
-            outputs = self.cfg["data"]["subaperture_config"]["output_indices"]
+        data = load_file(file_path)
+        full_tensor = data["x"]
 
-            for pol in self.requested_pols:
-                # Load Inputs (Sub-apertures)
-                for sa in inputs:
-                    i_key = self._get_band_name('i', pol, sa)
-                    q_key = self._get_band_name('q', pol, sa)
-                    complex_arr = f[i_key][:] + 1j * f[q_key][:]
-                    x_list.append(self._complex_to_channels(complex_arr))
+        x = self._select_channels(full_tensor, self.input_indices)
+        y = self._select_channels(full_tensor, self.output_indices)
 
-                for sa in outputs:
-                    # Logic: if sa is 0 or high, load full aperture (no SA suffix)
-                    # Adjust 'sa > 3' based on your actual SA count (usually 3)
-                    sa_label = sa if 1 <= sa <= 3 else None
-                    i_key = self._get_band_name('i', pol, sa_label)
-                    q_key = self._get_band_name('q', pol, sa_label)
-                    complex_arr = f[i_key][:] + 1j * f[q_key][:]
-                    y_list.append(self._complex_to_channels(complex_arr))
-
-            x = torch.cat(x_list, dim=0)
-            y = torch.cat(y_list, dim=0)
-
-            incidence_angle = f['bands/localIncidenceAngle'][:].mean()
-
-        if x.shape[-1] > x.shape[-2]:
-            x, y = x.transpose(-1, -2), y.transpose(-1, -2)
-
-        x, y = _normalize(x, y, global_max=self.cfg["data"].get("global_max", 4257)) # TODO: check global max for new dataset
-
-        target_h = self.cfg["data"].get("image_height", 96)
-        target_w = self.cfg["data"].get("image_width", 96)
-        # x, y = _strip_crop(x, y, target_h, target_w)
+        g_max = self.cfg["data"].get("global_max", 2.5)
+        x, y = _normalize(x, y, global_max=g_max)
 
         if self.da:
             x, y = tfm_dihedral([x, y], random.randint(0, 7))
 
         meta_out = {
             "idx": idx,
-            "incidence_angle": torch.tensor(float(incidence_angle)),
-            "patch_id": os.path.basename(file_path)
+            "patch_id": os.path.basename(file_path),
+            "product_id": os.path.basename(os.path.dirname(file_path))
         }
 
         return x, y, meta_out
+
 
     def _complex_to_channels(self, arr):
         mag = np.abs(arr).astype(np.float32)
@@ -197,56 +160,156 @@ class H5ComplexSARDataset(Dataset):
 
 if __name__ == "__main__":
     ## ---- TEST ---- ##
+    ##
+    ## -------------- ##
+    def test_loading():
+        # 1. Mock a minimal config
+        cfg = {
+            "seed": 42,
+            "data": {
+                "root_dir": "/shared/home/lvanderpeet/AE5822-Thesis/dataset_patches_128",
+                "split": {"train": 0.8, "valid": 0.1},
+                "global_max": 2.5,
+                "subaperture_config": {
+                    "active_polarizations": ["VV", "VH"],
+                    "input_indices": [1, 2, 3],  # SA1, SA2, SA3
+                    "output_indices": [0]  # Full Aperture
+                }
+            }
+        }
+
+        print("--- Initializing Training Set ---")
+        train_ds = SafetensorSARDataset(cfg, split='train', da=True)
+
+        print("\n--- Initializing Validation Set ---")
+        val_ds = SafetensorSARDataset(cfg, split='valid', da=False)
+
+        # 2. Check for Data Leakage (The most important test)
+        train_products = set([os.path.basename(os.path.dirname(f)) for f in train_ds.files])
+        val_products = set([os.path.basename(os.path.dirname(f)) for f in val_ds.files])
+        overlap = train_products.intersection(val_products)
+
+        if len(overlap) == 0:
+            print(f" Leakage Check Passed: 0 products shared between Train and Val.")
+        else:
+            print(f" Leakage Check Failed: {len(overlap)} products are in both sets!")
+
+        # 3. Test __getitem__ and Shapes
+        print("\n--- Testing Tensor Shapes ---")
+        x, y, meta = train_ds[0]
+
+        # Expected Channels:
+        # Input (x): 3 SAs * 2 pols * 2 (I/Q) = 12 channels
+        # Output (y): 1 Full * 2 pols * 2 (I/Q) = 4 channels
+        print(f"Input (x) shape:  {x.shape} (Expected [12, 128, 128])")
+        print(f"Target (y) shape: {y.shape} (Expected [4, 128, 128])")
+        print(f"Value range (x):  {x.min():.2f} to {x.max():.2f}")
+
+        # 4. Test DataLoader (Multi-worker check)
+        print("\n--- Testing DataLoader (Batching) ---")
+        loader = DataLoader(train_ds, batch_size=4, shuffle=True, num_workers=2)
+        batch_x, batch_y, batch_meta = next(iter(loader))
+        print(f"Batch X shape: {batch_x.shape}")
+        print(" All tests passed!")
+
+    test_loading()
+
+
+
+    ## ---- TEST ---- ##
+    ## Displays structure of a singular .h5 file.
+    ## -------------- ##
+    # test_cfg = {
+    #     "data": {
+    #         "root_dir": "/shared/home/lvanderpeet/AE5822-Thesis/dataset",  # Relative path to your dataset folder
+    #         "subaperture_config": {
+    #             "active_polarizations": ["VV"],
+    #             "input_indices": [1, 2, 3],  # SA1, SA2, SA3
+    #             "output_indices": [4]  # 4 maps to Full Aperture in our logic
+    #         },
+    #         "split": {"train": 0.8, "valid": 0.1},
+    #         "image_height": 96,
+    #         "image_width": 96,
+    #         "global_max": 4257
+    #     },
+    #     "seed": 42
+    # }
+    #
+    # train_ds = H5ComplexSARDataset(test_cfg, split='train', da=True)
+    # valid_ds = H5ComplexSARDataset(test_cfg, split='valid', da=False)
+    # test_ds = H5ComplexSARDataset(test_cfg, split='test', da=False)
+
+
+
+    # import h5py
+    #
+    # file_path = '/shared/home/lvanderpeet/AE5822-Thesis/dataset/S1A_S3_SLC__1SDV_20160820T171616_20160820T171644_012687_013EFB_B6D5/559U_44R.h5'
+    #
+    #
+    # def print_structure(name, obj):
+    #     if isinstance(obj, h5py.Dataset):
+    #         print(f"  [Dataset] {name:40} | Shape: {str(obj.shape):15} | Dtype: {obj.dtype}")
+    #     elif isinstance(obj, h5py.Group):
+    #         print(f"  [Group]   {name}")
+    #
+    #
+    # with h5py.File(file_path, 'r') as f:
+    #     print(f"\nStructure of {file_path.split('/')[-1]}:")
+    #     print("-" * 80)
+    #     f.visititems(print_structure)
+    #     print("-" * 80)
+
+    ## ---- TEST ---- ##
     ## inspect tensor shapes and information in tiles
     ## -------------- ##
-    test_cfg = {
-        "data": {
-            "root_dir": "/shared/home/lvanderpeet/AE5822-Thesis/dataset",  # Relative path to your dataset folder
-            "subaperture_config": {
-                "active_polarizations": ["VV"],
-                "input_indices": [1, 2, 3],  # SA1, SA2, SA3
-                "output_indices": [4]  # 4 maps to Full Aperture in our logic
-            },
-            "split": {"train": 1.0, "valid": 0.0},
-            "image_height": 96,
-            "image_width": 96,
-            "global_max": 4257
-        },
-        "seed": 42
-    }
-
-    print("---  Testing H5ComplexSARDataset Loading ---")
-
-    try:
-        # 2. Initialize the dataset
-        # We use split='train' to find the files in the B6D5 folder
-        dataset = H5ComplexSARDataset(test_cfg, split='train', da=True)
-
-        if len(dataset) == 0:
-            print(" No files found. Check if 'root_dir' matches your path.")
-        else:
-            print(f" Found {len(dataset)} tiles.")
-
-            # 3. Pull a sample (This runs __getitem__)
-            x, y, meta = dataset[0]
-
-            print("\n[TENSOR SHAPES]")
-            print(f"  Input (x):  {x.shape}")
-            print(f"  Target (y): {y.shape}")
-
-            print("\n[VALUE RANGES]")
-            print(f"  X Min/Max: {x.min():.4f} / {x.max():.4f}")
-            print(f"  Y Min/Max: {y.min():.4f} / {y.max():.4f}")
-
-            print("\n[METADATA]")
-            print(f"  Patch ID: {meta['patch_id']}")
-            print(f"  Incidence Angle: {meta['incidence_angle']:.2f}°")
-
-    except Exception as e:
-        print(f"\n ERROR during execution: {e}")
-        import traceback
-
-        traceback.print_exc()
+    # test_cfg = {
+    #     "data": {
+    #         "root_dir": "/shared/home/lvanderpeet/AE5822-Thesis/dataset",  # Relative path to your dataset folder
+    #         "subaperture_config": {
+    #             "active_polarizations": ["VV"],
+    #             "input_indices": [1, 2, 3],  # SA1, SA2, SA3
+    #             "output_indices": [4]  # 4 maps to Full Aperture in our logic
+    #         },
+    #         "split": {"train": 1.0, "valid": 0.0},
+    #         "image_height": 96,
+    #         "image_width": 96,
+    #         "global_max": 4257
+    #     },
+    #     "seed": 42
+    # }
+    #
+    # print("---  Testing H5ComplexSARDataset Loading ---")
+    #
+    # try:
+    #     # 2. Initialize the dataset
+    #     # We use split='train' to find the files in the B6D5 folder
+    #     dataset = H5ComplexSARDataset(test_cfg, split='train', da=True)
+    #
+    #     if len(dataset) == 0:
+    #         print(" No files found. Check if 'root_dir' matches your path.")
+    #     else:
+    #         print(f" Found {len(dataset)} tiles.")
+    #
+    #         # 3. Pull a sample (This runs __getitem__)
+    #         x, y, meta = dataset[4]
+    #
+    #         print("\n[TENSOR SHAPES]")
+    #         print(f"  Input (x):  {x.shape}")
+    #         print(f"  Target (y): {y.shape}")
+    #
+    #         print("\n[VALUE RANGES]")
+    #         print(f"  X Min/Max: {x.min():.4f} / {x.max():.4f}")
+    #         print(f"  Y Min/Max: {y.min():.4f} / {y.max():.4f}")
+    #
+    #         print("\n[METADATA]")
+    #         print(f"  Patch ID: {meta['patch_id']}")
+    #         print(f"  Incidence Angle: {meta['incidence_angle']:.2f}°")
+    #
+    # except Exception as e:
+    #     print(f"\n ERROR during execution: {e}")
+    #     import traceback
+    #
+    #     traceback.print_exc()
 
     ## ---- TEST ---- ##
     ## Plot magnitude of patches
