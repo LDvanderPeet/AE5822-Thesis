@@ -49,6 +49,7 @@ def main() -> None:
     opt_cfg = config.get("optimization", {})
     lr_sched_cfg = opt_cfg.get("reduce_lr_on_plateau", {})
     unet_cfg = model_cfg.get("unet", {})
+    ema_cfg = model_cfg.get("ema", {})
     wandb_cfg = config.get("logging", {}).get("wandb", {})
 
     # This is the Lightning model used for training and validation.
@@ -66,6 +67,10 @@ def main() -> None:
         lr=opt_cfg.get("lr", 1e-3),
         lr_scheduler_factor=lr_sched_cfg.get("factor", 0.5),
         lr_scheduler_patience=lr_sched_cfg.get("patience", 10),
+        ema_enabled=ema_cfg.get("enabled", False),
+        ema_beta=ema_cfg.get("beta", 0.9999),
+        ema_update_every=ema_cfg.get("update_every", 1),
+        ema_update_after_step=ema_cfg.get("update_after_step", 0),
     )
 
     trainer_cfg = config.get("trainer", {})

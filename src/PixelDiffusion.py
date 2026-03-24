@@ -1,3 +1,4 @@
+import numpy as np
 import pytorch_lightning as pl
 import torch
 import torch.nn.functional as F
@@ -6,6 +7,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 
 from .DenoisingDiffusionProcess import *
+from .EMA import EMAWrapper
 
 
 
@@ -32,6 +34,11 @@ def _build_hybrid_diffusion_loss(num_timesteps):
 
     return _build_hybrid_diffusion_loss
 
+def _l1_diffusion_loss(noise, noise_hat, t):
+    """Wrapper for L1 loss to accept the timestep 't' argument"""
+    del t
+    return F.l1_loss(noise_hat, noise)
+
 
 class PixelDiffusionConditional(pl.LightningModule):
     """Conditional pixel-space diffusion Lightning module.
@@ -53,17 +60,29 @@ class PixelDiffusionConditional(pl.LightningModule):
                  model_out_dim=None,
                  lr=1e-3,
                  lr_scheduler_factor=0.5,
-                 lr_scheduler_patience=10):
+                 lr_scheduler_patience=10,
+                 ema_enabled=False,
+                 ema_beta=0.9999,
+                 ema_update_every=1,
+                 ema_update_after_step=0):
+
         super().__init__()
         self.lr = lr
         self.lr_scheduler_factor=lr_scheduler_factor
         self.lr_scheduler_patience=lr_scheduler_patience
+        self.ema_enabled = ema_enabled
+        self.ema_beta = float(ema_beta)
+        self.ema_update_every = int(ema_update_every)
+        self.ema_update_after_step = int(ema_update_after_step)
+        self.ema_step = 0
         
         self.loss_name = loss_fn.lower()
         if self.loss_name == 'mse':
             resolved_loss_fn = None
         elif self.loss_name == 'hybrid':
             resolved_loss_fn = _build_hybrid_diffusion_loss(num_timesteps)
+        elif self.loss_name == 'mae':
+            resolved_loss_fn = _l1_diffusion_loss
         else:
             raise ValueError(f"Unsupported model.loss_fn {self.loss_name}. Expected one of 'mse', 'hybrid'.")
 
@@ -78,6 +97,17 @@ class PixelDiffusionConditional(pl.LightningModule):
                                                         model_dim_mults=model_dim_mults,
                                                         model_channels=model_channels,
                                                         model_out_dim=model_out_dim)
+        self.ema = (
+            EMAWrapper(
+                model=self.model,
+                decay=self.ema_beta,
+                apply_every_n_steps=self.ema_update_every,
+                start_step=self.ema_update_after_step,
+            )
+            if self.ema_enabled
+            else None
+        )
+
 
     @torch.no_grad()
     def forward(self, *args, **kwargs):
@@ -86,11 +116,11 @@ class PixelDiffusionConditional(pl.LightningModule):
 
     def input_T(self, input):
         # Model internally expects values in [-1, 1].
-        return (input.clip(0, 1).mul_(2)).sub_(1)
+        return (input.clip(0, 1).mul(2)).sub(1)
 
     def output_T(self, input):
         # Inverse mapping from [-1, 1] back to [0, 1] for visualization/metrics.
-        return (input.add_(1)).div_(2)
+        return input.add_(1).div(2)
     
     def training_step(self, batch, batch_idx):   
         """Lightning train hook for conditional diffusion."""
@@ -118,8 +148,14 @@ class PixelDiffusionConditional(pl.LightningModule):
             self.log('val_recon_psnr', psnr, on_step=False, on_epoch=True, prog_bar=True, logger=True)
             self.log('val_recon_ssim', ssim, on_step=False, on_epoch=True, prog_bar=True, logger=True)
             self.log('val_recon_l1', l1, on_step=False, on_epoch=True, prog_bar=True, logger=True)
-            self._log_val_reconstruction(input, pred_batch, output)
-        
+            ema_pred_batch = self._predict_with_ema_model(input)
+            if ema_pred_batch is not None:
+                ema_psnr, ema_ssim, ema_l1 = self._compute_reconstruction_metrics(ema_pred_batch, output)
+                self.log('val_recon_psnr_ema', ema_psnr, on_step=False, on_epoch=True, prog_bar=True, logger=True)
+                self.log('val_recon_ssim_ema', ema_ssim, on_step=False, on_epoch=True, prog_bar=True, logger=True)
+                self.log('val_recon_l1_ema', ema_l1, on_step=False, on_epoch=True, prog_bar=True, logger=True)
+            self._log_val_reconstruction(input, pred_batch, output, ema_pred_batch=ema_pred_batch)
+
         return loss
 
     def predict_step(self, batch, batch_idx, dataloader_idx=0):
@@ -132,6 +168,24 @@ class PixelDiffusionConditional(pl.LightningModule):
         input,_ = batch
         pred = self.model(self.input_T(input))
         return self.output_T(pred)
+
+    @torch.no_grad()
+    def _predict_with_ema_model(self, input_batch):
+        if self.ema is None:
+            return None
+        pred = self.ema.ema_model(self.input_T(input_batch))
+        return self.output_T(pred)
+
+    @torch.no_grad()
+    def _update_ema(self):
+        if self.ema is None:
+            return
+        self.ema.update(self.model, step=self.global_step)
+
+    def on_train_batch_end(self, outputs, batch, batch_idx):
+        del outputs, batch, batch_idx
+        self._update_ema()
+
 
     def configure_optimizers(self):
         """Create optimizer and ReduceLROnPlateau scheduler monitored on `val_loss`."""
@@ -149,10 +203,22 @@ class PixelDiffusionConditional(pl.LightningModule):
 
     def _to_plot_image(self, tensor):
         """Convert CHW tensor to a matplotlib-friendly image array."""
-        image = tensor.detach().float().cpu().clamp(0, 1)
-        # if image.shape[0] >= 3:
-            # return image[:3].permute(1, 2, 0).numpy(), None
-        return image[0].numpy(), 'gray'
+        image = tensor.detach().float().cpu()
+
+        if image.shape[0] >= 2:
+            mag = torch.sqrt(image[0].square() + image[1].square()).numpy()
+        else:
+            mag = image[0].abs().numpy()
+
+        global_max = 2.5
+        log_max = np.log1p(global_max)
+        mag = np.exp(mag * log_max) - 1.0
+
+        scale = float(np.mean(mag) + 3.0 * np.std(mag))
+        if scale <= 0.0:
+            scale = 1.0
+        mag = np.clip(mag / scale, 0.0, 1.0)
+        return mag, 'gray'
 
     def _compute_reconstruction_metrics(self, pred_batch, target_batch):
         """Compute batch-level reconstruction metrics on [0, 1] tensors."""
@@ -184,8 +250,8 @@ class PixelDiffusionConditional(pl.LightningModule):
 
         return psnr, ssim, l1
 
-    def _log_val_reconstruction(self, input_batch, pred_batch, target_batch):
-        """Log a single `x | pred | y` reconstruction panel to W&B."""
+    def _log_val_reconstruction(self, input_batch, pred_batch, target_batch, ema_pred_batch=None):
+        """Log a single `x | pred_regular | pred_ema | y` reconstruction panel to W&B."""
         if self.logger is None or self.trainer is None or not self.trainer.is_global_zero:
             return
 
@@ -199,16 +265,28 @@ class PixelDiffusionConditional(pl.LightningModule):
         pred_img, pred_cmap = self._to_plot_image(pred_batch[0])
         y_img, y_cmap = self._to_plot_image(target_batch[0])
 
-        fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+        if ema_pred_batch is not None:
+            ema_img, ema_cmap = self._to_plot_image(ema_pred_batch[0])
+            fig, axes = plt.subplots(1, 4, figsize=(16, 4))
+        else:
+            fig, axes = plt.subplots(1, 3, figsize=(12, 4))
         axes[0].imshow(x_img, cmap=x_cmap)
         axes[0].set_title('x')
         axes[0].axis('off')
         axes[1].imshow(pred_img, cmap=pred_cmap)
-        axes[1].set_title('pred')
+        axes[1].set_title('pred_regular')
         axes[1].axis('off')
-        axes[2].imshow(y_img, cmap=y_cmap)
-        axes[2].set_title('y')
-        axes[2].axis('off')
+        if ema_pred_batch is not None:
+            axes[2].imshow(ema_img, cmap=ema_cmap)
+            axes[2].set_title('pred_ema')
+            axes[2].axis('off')
+            axes[3].imshow(y_img, cmap=y_cmap)
+            axes[3].set_title('y')
+            axes[3].axis('off')
+        else:
+            axes[2].imshow(y_img, cmap=y_cmap)
+            axes[2].set_title('y')
+            axes[2].axis('off')
         fig.tight_layout()
 
         self.logger.experiment.log(
