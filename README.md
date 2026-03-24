@@ -178,6 +178,31 @@ python3 train.py --config configs/config.yaml
 - first validation batch logs reconstruction image and metrics
 - loss decreases on a small overfit subset
 
+## 8. Evaluate a Saved Run/Checkpoint
+
+Use `evaluate.py` to compute SAR-specific reconstruction metrics for a saved checkpoint:
+
+```bash
+python3 evaluate.py \ 
+  --config configs/config.yaml \
+  --checkpoint /path/to/model.ckpt \
+  --split test
+```
+
+Reported metrics:
+- `psf_azimuth_rel_err`: relative 3 dB width error in azimuth.
+- `psf_range_rel_err`: relative 3 dB width error in range.
+- `enl_rel_err`: relative ENL error on intensity.
+- `kde_js_disntance`: Jensen-Shannon distance between KDEs of reconstructed vs target intensity.
+- `rel_phase_mae_rad`: mean absolute wrapped error of relative phase (radians).
+- `rel_phase_coherence`: circular coherence of relative phase errors (1.0 is best).
+
+You can optionally save the summary to disk:
+
+```bash
+python3 evaluate.py --config configs.yaml --checkpoint /path/to/model.ckpt --output-json reports/sar_eval.json
+```
+
 ## Project Files
 
 - Training entrypoint: [`train.py`](/work/code/dif_img_rec/train.py)
