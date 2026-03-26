@@ -1,9 +1,13 @@
 runs/
 dataset/
+dataset_patches_128/
+logs/
+archive/
 *.pth
 *.zarr
 *.npy
 *.png
+*.safetensor
 
 __pycache__/
 .idea/
