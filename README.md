@@ -127,7 +127,22 @@ trainer:
   devices: 1
   precision: 32
   log_every_n_steps: 10
-  enable_checkpointing: false
+  enable_checkpointing: true
+  checkpointing:
+    dirpath: checkpoints
+    filename: "{epoch:03d}--{val_loss:.4f}"
+    monitor: val_loss
+    mode: min
+    save_top_k: 3
+    save_last: true
+    every_n_epochs: 1
+    auto_inset_metric_name: false
+```
+
+Resume a stopped run from any saved checkpoint:
+
+```bash
+python3 train.py --config configs/config.yaml --resume-from-ckpt checkpoints/last.ckpt
 ```
 
 ## 5. Optional W&B Setup
@@ -211,3 +226,45 @@ python3 evaluate.py --config configs.yaml --checkpoint /path/to/model.ckpt --out
 - DataModule scaffold: [`data/datamodule.py`](/work/code/dif_img_rec/data/datamodule.py)
 - Lightning model: [`src/PixelDiffusion.py`](/work/code/dif_img_rec/src/PixelDiffusion.py)
 - Diffusion internals: [`src/DenoisingDiffusionProcess/`](/work/code/dif_img_rec/src/DenoisingDiffusionProcess)
+
+## Model Flow Chart (Inputs, Outputs, and Structure)
+
+```mermaid
+flowchart TD
+    A[Dataset / DataModule<br/>returns paired tensors (x, y)<br/>shape: [B, C, H, W], normalized to [0,1]] --> B[PixelDiffusionConditional]
+    B --> C[input_T<br/>maps x,y from [0,1] to [-1,1]]
+
+    C --> D[Training path]
+    C --> E[Inference / Predict path]
+
+    subgraph TRAIN[Training path]
+        D --> T1[Sample random timestep t]
+        T1 --> T2[GaussianForwardProcess<br/>q(y_t | y_0, t)<br/>adds noise to target y]
+        T2 --> T3[Concat condition and noisy target<br/>model_input = concat(y_t, x)]
+        T3 --> T4[U-Net ConvNeXt backbone<br/>predicts noise_hat]
+        T4 --> T5[Loss(noise, noise_hat, t)<br/>MSE or Hybrid]
+        T5 --> T6[Backprop + AdamW update]
+    end
+
+    subgraph INFER[Inference / Predict path]
+        E --> I1[Initialize x_T ~ N(0, I)]
+        I1 --> I2[For t = T-1 ... 0]
+        I2 --> I3[Concat current sample with condition<br/>model_input = concat(x_t, x)]
+        I3 --> I4[U-Net ConvNeXt predicts noise z_t]
+        I4 --> I5[Sampler step (DDPM/DDIM)<br/>x_{t-1} = p(x_{t-1} | x_t, z_t)]
+        I5 --> I2
+        I2 --> I6[Final reconstruction x_0]
+        I6 --> I7[output_T<br/>maps [-1,1] back to [0,1]]
+        I7 --> I8[Model output: pred]
+    end
+
+    T6 --> M[Validation metrics/logging<br/>train_loss, val_loss, PSNR, SSIM, L1]
+    I8 --> M
+```
+
+### Quick shape/channel summary
+
+- **Input condition**: `x` with `model.in_channels` channels.
+- **Target/output**: `y` with `model.out_channels` channels.
+- **U-Net input channels**: typically `in_channels + out_channels` (concat condition + current noisy sample).
+- **U-Net output channels**: `out_channels` (predicted noise for generated channels).
