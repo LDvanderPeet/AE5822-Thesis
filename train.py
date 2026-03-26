@@ -6,7 +6,7 @@ from pathlib import Path
 import pytorch_lightning as pl
 import torch
 import yaml
-from pytorch_lightning.callbacks import LearningRateMonitor
+from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 from pytorch_lightning.loggers import WandbLogger
 
 from data import PairedDataModule
@@ -32,6 +32,7 @@ def main() -> None:
     parser.add_argument("--config", type=str, default="configs/config.yaml")
     # Optional override for Lightning's validation batch fraction/count.
     parser.add_argument("--limit-val-batches", type=float, default=None)
+    parser.add_argument("--resume-from-ckpt", type=str, default=None)
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -89,6 +90,17 @@ def main() -> None:
     )
     # Trainer controls loop behavior, device placement, precision, and logging cadence.
     lr_monitor = LearningRateMonitor(logging_interval="step")
+    checkpoint_cfg = trainer_cfg.get("checkpointing", {})
+    checkpoint_callback = ModelCheckpoint(
+        dirpath=checkpoint_cfg.get("dirpath", "checkpoints"),
+        filename=checkpoint_cfg.get("filename", "{epoch:03d}-{val_loss:.4f}"),
+        monitor=checkpoint_cfg.get("monitor", "val_loss"),
+        mode=checkpoint_cfg.get("mode", "min"),
+        save_top_k=checkpoint_cfg.get("save_top_k", 3),
+        save_last=checkpoint_cfg.get("save_last", True),
+        every_n_epochs=checkpoint_cfg.get("every_n_epochs", 1),
+        auto_insert_metric_name=checkpoint_cfg.get("auto_insert_metric_name", False),
+    )
     trainer = pl.Trainer(
         max_epochs=trainer_cfg.get("max_epochs", 1),
         accelerator=trainer_cfg.get("accelerator", "auto"),
@@ -97,12 +109,14 @@ def main() -> None:
         log_every_n_steps=trainer_cfg.get("log_every_n_steps", 10),
         enable_checkpointing=trainer_cfg.get("enable_checkpointing", False),
         limit_val_batches=limit_val_batches,
+        gradient_clip_val=trainer_cfg.get("gradient_clip_val", 1.0),
+        gradient_clip_algorithm=trainer_cfg.get("gradient_clip_algorithm", "norm"),
         logger=wandb_logger,
-        callbacks=[lr_monitor],
+        callbacks=[lr_monitor, checkpoint_callback],
     )
 
     # Starts the training/validation loop.
-    trainer.fit(model, datamodule=datamodule)
+    trainer.fit(model, datamodule=datamodule, ckpt_path=args.resume_from_ckpt)
 
 
 if __name__ == "__main__":

@@ -24,12 +24,12 @@ model:
   num_timesteps: 1000  # Number of diffusion denoising steps.
   schedule: cosine  # Beta schedule variant for the forward process.
   loss_fn: mae # 'mse' for classic DDPM loss, 'hybrid' to blend L2 (high t) with MS-SSIM (low t)
-  noise_offset: 0.1 # optional low-frequency offset term to training noise
+  noise_offset: 0.0 # optional low-frequency offset term to training noise
   ema:
-    enabled: true  # Keep an exponential moving average copy of training weights.
+    enabled: false  # Keep an exponential moving average copy of training weights.
     beta: 0.9999  # EMA decay. Closer to 1.0 means smoother but slower-reacting EMA weights.
     update_every: 1  # Apply EMA update every N train batches.
-    update_after_step: 100  # Start EMA smoothing after this many updates; before that copy weights directly.
+    update_after_step: 10000  # Start EMA smoothing after this many updates; before that copy weights directly.
   unet:
     dim: 48  # Base UNet width. Previous setting was 64; 48 reduces parameter count to about half (30M instead of 55M).
     dim_mults: [1, 2, 4, 8]  # Width multipliers per UNet level.
@@ -37,7 +37,7 @@ model:
     out_dim: 1  # UNet output channels; should match model.out_channels.
 
 optimization:
-  lr: 0.0005  # AdamW learning rate.
+  lr: 0.00005  # AdamW learning rate.
   reduce_lr_on_plateau:
     factor: 0.5  # Multiplicative LR drop factor when metric plateaus.
     patience: 10  # Number of bad validation epochs before LR is reduced.
@@ -46,15 +46,26 @@ trainer:
   max_epochs: 100  # Total number of training epochs.
   accelerator: auto  # Lightning accelerator selection: auto/cpu/gpu/mps.
   devices: 1  # Number of devices to use (e.g. 1 for single GPU/CPU process).
-  precision: 16  # Numeric precision used by Lightning.
+  precision: 32  # Numeric precision used by Lightning.
+  gradient_clip_val: 1.0 # Clip gradients each step to reduce exploding updates (use 0 to disable).
+  gradient_clip_algorithm: norm # "norm" (global L2 norm) or "value" (use 0 to disable).
   log_every_n_steps: 10  # Logging frequency in training steps.
-  enable_checkpointing: false  # Disable Lightning checkpoint callback by default.
+  enable_checkpointing: true  # Disable Lightning checkpoint callback by default.
   limit_val_batches: 0.8  # Validation coverage per epoch. Float in [0,1] or int number of batches.
+  checkpointing:
+    dirpath: checkpoints  # Output directory for saved checkpoints.
+    filename: "{epoch:03d}-{val_loss:.4f}"  # Pattern used for top-k checkpoint names.
+    monitor: val_loss  # Metric used to rank checkpoints.
+    mode: min  # "min" for losses, "max" for scores.
+    save_top_k: 3  # Keep the best N monitored checkpoints.
+    save_last: true  # Also keep/update last.ckpt each epoch.
+    every_n_epochs: 1  # Save at this epoch interval.
+    auto_insert_metric_name: false  # Keep compact names without monitor key prefix.
 
 logging:
   wandb:
     project: dif_img_rec  # Weights & Biases project name.
-    name: final_data_mae_5e-4  # Optional run name; null lets W&B auto-generate one.
+    name: testing_stability  # Optional run name; null lets W&B auto-generate one.
     save_dir: logs  # Local directory used by W&B for run files.
     log_model: false  # Whether to upload model artifacts automatically.
   mode: train

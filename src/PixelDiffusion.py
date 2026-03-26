@@ -7,7 +7,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 
 from .DenoisingDiffusionProcess import *
-from .EMA import EMAWrapper
+# from .EMA import EMAWrapper
 
 
 
@@ -22,7 +22,7 @@ def _build_hybrid_diffusion_loss(num_timesteps):
         noise_hat_01 = (noise_hat + 1.0) * 0.5
         ms_ssim = multiscale_structural_similarity_index_measure(
             noise_hat_01,
-            noise_hat_01,
+            noise_01,
             data_range=1.0,
             reduction='none'
         )
@@ -32,7 +32,7 @@ def _build_hybrid_diffusion_loss(num_timesteps):
         hybrid_per_sample = (1.0 - ms_ssim_weight) * mse_per_sample + ms_ssim_weight * (1.0 - ms_ssim)
         return hybrid_per_sample.mean()
 
-    return _build_hybrid_diffusion_loss
+    return _hybrid_diffusion_loss
 
 def _l1_diffusion_loss(noise, noise_hat, t):
     """Wrapper for L1 loss to accept the timestep 't' argument"""
@@ -75,7 +75,7 @@ class PixelDiffusionConditional(pl.LightningModule):
         self.ema_update_every = int(ema_update_every)
         self.ema_update_after_step = int(ema_update_after_step)
         self.ema_step = 0
-        
+
         self.loss_name = loss_fn.lower()
         if self.loss_name == 'mse':
             resolved_loss_fn = None
@@ -120,7 +120,7 @@ class PixelDiffusionConditional(pl.LightningModule):
 
     def output_T(self, input):
         # Inverse mapping from [-1, 1] back to [0, 1] for visualization/metrics.
-        return input.add_(1).div(2)
+        return input.add(1).div(2)
     
     def training_step(self, batch, batch_idx):   
         """Lightning train hook for conditional diffusion."""
@@ -168,23 +168,6 @@ class PixelDiffusionConditional(pl.LightningModule):
         input,_ = batch
         pred = self.model(self.input_T(input))
         return self.output_T(pred)
-
-    @torch.no_grad()
-    def _predict_with_ema_model(self, input_batch):
-        if self.ema is None:
-            return None
-        pred = self.ema.ema_model(self.input_T(input_batch))
-        return self.output_T(pred)
-
-    @torch.no_grad()
-    def _update_ema(self):
-        if self.ema is None:
-            return
-        self.ema.update(self.model, step=self.global_step)
-
-    def on_train_batch_end(self, outputs, batch, batch_idx):
-        del outputs, batch, batch_idx
-        self._update_ema()
 
 
     def configure_optimizers(self):

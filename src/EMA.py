@@ -39,7 +39,12 @@ class EMA:
                 # Keep behavior similar to DiffusionFastForward:
                 # if shapes mismatch, skip that tensor.
                 continue
-            ema_value.mul_(self.decay).add_(current_value, alpha=1.0 - self.decay)
+            if not torch.is_floating_point(ema_value):
+                continue
+            ema_value_fp32 = ema_value.float()
+            current_value_fp32 = current_value.float()
+            ema_value_fp32.mul_(self.decay).add_(current_value_fp32, alpha=1 - self.decay)
+            ema_value.copy_(ema_value_fp32.to(dtype=ema_value.dtype))
 
     @torch.no_grad()
     def update(self, ema_model: nn.Module, current_model: nn.Module, step: int) -> None:
@@ -64,7 +69,7 @@ class EMAWrapper(nn.Module):
             apply_every_n_steps=apply_every_n_steps,
             start_step=start_step,
         )
-        self.ema_model = deepcopy(model).eval()
+        self.ema_model = deepcopy(model).float().eval()
         for param in self.ema_model.parameters():
             param.requires_grad = False
 
@@ -73,5 +78,6 @@ class EMAWrapper(nn.Module):
         # Before scheduled EMA starts, keep exact copy to avoid stale weights.
         if step < self.ema.start_step:
             self.ema_model.load_state_dict(model.state_dict())
+            self.ema_model.float()
             return
         self.ema.update(self.ema_model, model, step)
