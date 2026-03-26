@@ -23,7 +23,9 @@ model:
   out_channels: 1  # Channels in the reconstruction target y.
   num_timesteps: 1000  # Number of diffusion denoising steps.
   schedule: cosine  # Beta schedule variant for the forward process.
-  loss_fn: mae # 'mse' for classic DDPM loss, 'hybrid' to blend L2 (high t) with MS-SSIM (low t)
+  loss_fn: mae # 'mse' (L2), 'mae' (L1), or 'hybrid' (MS-SSIM for low t and L1/L2 otherwise).
+  hybrid_base_loss: mse # Only used when loss_fn='hybrid': choose fallback loss at high t ('mse' or 'mae').
+  hybrid_ms_ssim_t_limit: 10 # Only used when loss_fn='hybrid': apply MS-SSIM for timesteps t <= this limit.
   noise_offset: 0.0 # optional low-frequency offset term to training noise
   ema:
     enabled: false  # Keep an exponential moving average copy of training weights.

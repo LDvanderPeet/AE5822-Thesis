@@ -7,29 +7,40 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 
 from .DenoisingDiffusionProcess import *
-# from .EMA import EMAWrapper
+from .EMA import EMAWrapper
 
 
 
-def _build_hybrid_diffusion_loss(num_timesteps):
-    """Create timestep-aware hybrid loss for diffusion training."""
-    denom = max(float(num_timesteps - 1, 1.0))
+def _build_hybrid_diffusion_loss(num_timesteps, base_loss='mse', ms_ssim_t_limit=10):
+    """Create timestep-aware hybrid loss for diffusion training.
+
+    For early timesteps (t <= ms_ssim_t_limit), optimize 1 - MS-SSIM.
+    For later timesteps, optimize the configured base loss (L1/L2)."""
+    del num_timesteps
+
+    base_loss_name = base_loss.lower()
+    if base_loss_name == 'mse':
+        base_loss_fn = lambda pred, target: F.mse_loss(pred, target, reduction='none').flatten(1).mean(dim=1)
+    elif base_loss_name in {'mae', 'l1'}:
+        base_loss_fn = lambda pred, target: F.l1_loss(pred, target, reduction='none').flatten(1).mean(dim=1)
+    else:
+        raise ValueError(f"Unsupported hybrid base loss '{base_loss}'. Expected one of 'mse', 'mae', or 'l1'.")
 
     def _hybrid_diffusion_loss(noise, noise_hat, t):
-        mse_per_sample = F.mse_loss(noise_hat, noise, reduction='none').flatten(1).mean(dim=1)
+        base_per_sample = base_loss_fn(noise_hat, noise)
 
         noise_01 = (noise + 1.0) * 0.5
         noise_hat_01 = (noise_hat + 1.0) * 0.5
-        ms_ssim = multiscale_structural_similarity_index_measure(
+        ms_ssim_per_sample = multiscale_structural_similarity_index_measure(
             noise_hat_01,
             noise_01,
             data_range=1.0,
             reduction='none'
         )
+        ms_ssim_loss_per_sample = 1.0 - ms_ssim_per_sample
 
-        t_norm = t.float() / denom
-        ms_ssim_weight = 1.0 - t_norm
-        hybrid_per_sample = (1.0 - ms_ssim_weight) * mse_per_sample + ms_ssim_weight * (1.0 - ms_ssim)
+        use_ms_ssim = (t <= ms_ssim_t_limit)
+        hybrid_per_sample = torch.where(use_ms_ssim, ms_ssim_loss_per_sample, base_per_sample)
         return hybrid_per_sample.mean()
 
     return _hybrid_diffusion_loss
@@ -54,6 +65,8 @@ class PixelDiffusionConditional(pl.LightningModule):
                  schedule='linear',
                  noise_offset=0.0,
                  loss_fn='mse',
+                 hybrid_base_loss='mse',
+                 hybrid_ms_ssim_t_limt=10,
                  model_dim=64,
                  model_dim_mults=(1,2,4,8),
                  model_channels=None,
@@ -80,11 +93,15 @@ class PixelDiffusionConditional(pl.LightningModule):
         if self.loss_name == 'mse':
             resolved_loss_fn = None
         elif self.loss_name == 'hybrid':
-            resolved_loss_fn = _build_hybrid_diffusion_loss(num_timesteps)
+            resolved_loss_fn = _build_hybrid_diffusion_loss(
+                num_timesteps=num_timesteps,
+                base_loss=hybrid_base_loss,
+                ms_ssim_t_limit=hybrid_ms_ssim_t_limt
+            )
         elif self.loss_name == 'mae':
             resolved_loss_fn = _l1_diffusion_loss
         else:
-            raise ValueError(f"Unsupported model.loss_fn {self.loss_name}. Expected one of 'mse', 'hybrid'.")
+            raise ValueError(f"Unsupported model.loss_fn {self.loss_name}. Expected one of 'mse', 'mae', or 'hybrid'.")
 
         # Core conditional diffusion process used by training, validation, and prediction.
         self.model=DenoisingDiffusionConditionalProcess(generated_channels=generated_channels,
