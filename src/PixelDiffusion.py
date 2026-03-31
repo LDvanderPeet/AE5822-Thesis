@@ -147,7 +147,14 @@ class PixelDiffusionConditional(pl.LightningModule):
         self.log('train_loss',loss,on_step=True,on_epoch=True,prog_bar=True,logger=True)
         
         return loss
-            
+
+    def on_train_batch_end(self, outputs, batch, batch_idx):
+        """Update EMA shadow weights after each optimization step."""
+        del outputs, batch, batch_idx
+        if self.ema is None:
+            return
+        self.ema.update(self.model, step=self.global_step)
+
     def validation_step(self, batch, batch_idx):     
         """Lightning validation hook.
 
@@ -184,6 +191,14 @@ class PixelDiffusionConditional(pl.LightningModule):
         del batch_idx, dataloader_idx
         input,_ = batch
         pred = self.model(self.input_T(input))
+        return self.output_T(pred)
+
+    @torch.no_grad()
+    def _predict_with_ema_model(self, input_batch):
+        """Run prediction through EMA shadow model if EMA is enabled."""
+        if self.ema is None:
+            return None
+        pred = self.ema.ema_model(self.input_T(input_batch))
         return self.output_T(pred)
 
 
@@ -242,6 +257,9 @@ class PixelDiffusionConditional(pl.LightningModule):
                     p,
                     data_range=1.0,
                     channel_axis=0,
+                    win_size=11,
+                    gaussian_weights=True,
+                    sigma=1.5,
                 )
             )
 
