@@ -28,7 +28,7 @@ model:
   hybrid_ms_ssim_t_limit: 10 # Only used when loss_fn='hybrid': apply MS-SSIM for timesteps t <= this limit.
   noise_offset: 0.0 # optional low-frequency offset term to training noise
   ema:
-    enabled: false  # Keep an exponential moving average copy of training weights.
+    enabled: true  # Keep an exponential moving average copy of training weights.
     beta: 0.9999  # EMA decay. Closer to 1.0 means smoother but slower-reacting EMA weights.
     update_every: 1  # Apply EMA update every N train batches.
     update_after_step: 10000  # Start EMA smoothing after this many updates; before that copy weights directly.
@@ -67,7 +67,15 @@ trainer:
 logging:
   wandb:
     project: dif_img_rec  # Weights & Biases project name.
-    name: testing_stability  # Optional run name; null lets W&B auto-generate one.
+    name: testing_EMA  # Optional run name; null lets W&B auto-generate one.
     save_dir: logs  # Local directory used by W&B for run files.
     log_model: false  # Whether to upload model artifacts automatically.
   mode: train
+
+evaluation:
+  checkpoint_path: "logs/checkpoints/best.ckpt"
+  save_dir: "evaluation_results"
+  tests:
+    point_target_analysis: True
+    kde_distance: True
+    phase_coherence: True
