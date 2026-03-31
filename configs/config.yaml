@@ -28,7 +28,7 @@ model:
   hybrid_ms_ssim_t_limit: 10 # Only used when loss_fn='hybrid': apply MS-SSIM for timesteps t <= this limit.
   noise_offset: 0.0 # optional low-frequency offset term to training noise
   ema:
-    enabled: true  # Keep an exponential moving average copy of training weights.
+    enabled: false  # Keep an exponential moving average copy of training weights.
     beta: 0.9999  # EMA decay. Closer to 1.0 means smoother but slower-reacting EMA weights.
     update_every: 1  # Apply EMA update every N train batches.
     update_after_step: 10000  # Start EMA smoothing after this many updates; before that copy weights directly.
@@ -73,9 +73,9 @@ logging:
   mode: train
 
 evaluation:
-  checkpoint_path: "logs/checkpoints/best.ckpt"
+  checkpoint_path: "/shared/home/lvanderpeet/AE5822-Thesis/checkpoints/last.ckpt"
   save_dir: "evaluation_results"
   tests:
-    point_target_analysis: True
+    point_target_analysis: False
     kde_distance: True
-    phase_coherence: True
+    phase_coherence: False
