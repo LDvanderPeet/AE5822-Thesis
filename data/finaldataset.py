@@ -53,8 +53,8 @@ def _normalize(x, y, global_max=4257):
     x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
     y = torch.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
 
-    x = x / global_max
-    y = y / global_max
+    x = torch.log1p(x) / np.log1p(global_max)
+    y = torch.log1p(y) / np.log1p(global_max)
 
     return torch.clamp(x, 0.0, 1.0), torch.clamp(y, 0.0, 1.0)
 
@@ -66,44 +66,87 @@ class SafetensorSARDataset(Dataset):
     """
 
     def __init__(self, cfg, split='train', da=False):
+        """
+                Initializes the dataset with a Spatial Zone Split per product.
+
+                Logic:
+                1. Identify all product directories.
+                2. For EVERY product, split its patches geographically:
+                   - Top 70%: Training
+                   - Middle 15%: Validation (with buffer)
+                   - Bottom 15%: Testing (with buffer)
+                3. Accumulate all patches for the requested split.
+                4. Shuffle and cap the total count (100k for train, 10k for val/test).
+                """
         self.cfg = cfg
         self.da = da
         self.root_dir = cfg["data"]["root_dir"]
-        self.requested_pols = [p.upper() for p in cfg["data"]["subaperture_config"]["active_polarizations"]]  # ["VV", "VH"]
+        self.requested_pols = [p.upper() for p in cfg["data"]["subaperture_config"]["active_polarizations"]]
         self.input_indices = cfg["data"]["subaperture_config"].get("input_indices", [1, 3])
-        self.output_indices = cfg["data"]["subaperture_config"].get("output_indices", [2])
+        self.output_indices = cfg["data"]["subaperture_config"].get("output_indices", [0])
 
+        # 1. Get all unique product directories
+        # We use all products to maximize geographical diversity
         all_products = sorted([
             d for d in os.listdir(self.root_dir)
             if os.path.isdir(os.path.join(self.root_dir, d))
         ])
 
+        self.files = []
+        # A buffer of patches to prevent spatial leakage at the boundaries
+        # If your patches overlap by 50%, a buffer of 2 ensures no shared pixels.
+        buffer_size = 2
 
-        self.split_info = cfg["data"]["split"]
-        train_ratio = self.split_info.get("train", 0.8)
-        valid_ratio = self.split_info.get("valid", 0.1)
+        # 2. Extract patches from EVERY product based on the spatial split
+        for prod in all_products:
+            prod_path = os.path.join(self.root_dir, prod)
 
-        n = len(all_products)
+            # Sorting is CRITICAL to ensure the top-to-bottom spatial order
+            all_patches = sorted([
+                f for f in os.listdir(prod_path)
+                if f.endswith('.safetensors')
+            ])
+
+            n = len(all_patches)
+            if n < 20:  # Skip products that are too small to split meaningfully
+                continue
+
+            # Calculate geographical split indices (70% / 15% / 15%)
+            train_end = int(n * 0.70)
+
+            val_start = train_end + buffer_size
+            val_end = int(n * 0.85)
+
+            test_start = val_end + buffer_size
+
+            # Select patches based on the requested split
+            if split == 'train':
+                selected_filenames = all_patches[:train_end]
+            elif split == 'valid':
+                selected_filenames = all_patches[val_start:val_end]
+            elif split == 'test':
+                selected_filenames = all_patches[test_start:]
+            else:
+                raise ValueError(f"Invalid split name: {split}")
+
+            # Accumulate full paths
+            self.files.extend([os.path.join(prod_path, f) for f in selected_filenames])
+
+        # 3. Global Shuffle and Cap
+        # This ensures the 100k patches are a random mix from all available products
         random.seed(self.cfg.get("seed", 42))
-        random.shuffle(all_products)
-
-        train_end = int(n * train_ratio)
-        valid_end = int(n * (train_ratio + valid_ratio))
+        random.shuffle(self.files)
 
         if split == 'train':
-            selected_products = all_products[:train_end]
-        elif split == 'valid':
-            selected_products = all_products[train_end:valid_end]
+            limit = 100000
         else:
-            selected_products = all_products[valid_end:]
+            limit = 10000
 
-        self.files = []
-        for prod in selected_products:
-            prod_path = os.path.join(self.root_dir, prod)
-            patches = [os.path.join(prod_path, f) for f in os.listdir(prod_path)]
-            self.files.extend(patches)
+        # Apply the limit to keep the dataset size manageable
+        self.files = self.files[:limit]
 
-        print(f"Split {split}: {len(selected_products)} products, {len(self.files)} patches found.")
+        print(f"--- {split.upper()} Set Initialized ---")
+        print(f"Total patches: {len(self.files)} (sampled from {len(all_products)} products)")
 
 
     def __len__(self):
@@ -122,9 +165,15 @@ class SafetensorSARDataset(Dataset):
             base_offset = sa_idx * 4
 
             if "VV" in self.requested_pols:
-                selected.append(full_tensor[base_offset: base_offset + 2])  # Grab I and Q
+                i_vv = full_tensor[base_offset]
+                q_vv = full_tensor[base_offset + 1]
+                mag_vv = torch.sqrt(i_vv ** 2 + q_vv ** 2)
+                selected.append(mag_vv.unsqueeze(0))
             if "VH" in self.requested_pols:
-                selected.append(full_tensor[base_offset + 2: base_offset + 4])  # Grab I and Q
+                i_vh = full_tensor[base_offset + 2]
+                q_vh = full_tensor[base_offset + 3]
+                mag_vh = torch.sqrt(i_vh ** 2 + q_vh ** 2)
+                selected.append(mag_vh.unsqueeze(0))
 
         return torch.cat(selected, dim=0)
 
