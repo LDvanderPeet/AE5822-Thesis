@@ -70,6 +70,8 @@ logging:
     name: testing_EMA  # Optional run name; null lets W&B auto-generate one.
     save_dir: logs  # Local directory used by W&B for run files.
     log_model: false  # Whether to upload model artifacts automatically.
+    save_config_file: true # Upload the active YAML config file to W&B files/artifacts.
+    config_artifact_name: null # Optional custom artifact name; null defaults to config-<run_id>.
   mode: train
 
 evaluation:

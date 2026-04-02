@@ -18,6 +18,7 @@ def load_config(config_path: str) -> dict:
     with Path(config_path).open("r", encoding="utf-8") as handle:
         return yaml.safe_load(handle)
 
+
 def main() -> None:
     """Entry point for training with PyTorch Lightning.
 
@@ -74,6 +75,9 @@ def main() -> None:
         ema_beta=ema_cfg.get("beta", 0.9999),
         ema_update_every=ema_cfg.get("update_every", 1),
         ema_update_after_step=ema_cfg.get("update_after_step", 0),
+        wandb_save_config_file=wandb_cfg.get("save_config_file", True),
+        config_path=args.config,
+        wandb_config_artifact_name=wandb_cfg.get("config_artifact_name"),
     )
 
     trainer_cfg = config.get("trainer", {})

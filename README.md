@@ -191,7 +191,7 @@ python3 evaluate.py \
 
 ---
 ## Logging
-Wights & Biases settings are under `loggingin.wandb` in config.
+Weights & Biases settings are under `logging.wandb` in config.
 
 Config section:
 
@@ -202,7 +202,11 @@ logging:
     name: null
     save_dir: logs
     log_model: false
+    save_config_file: true
+    config_artifact_name: null
 ```
+
+When `save_config_file: true`, `train.py` uploads the exact YAML file passed via `--config` to W&B (both as run file and as `config` artifact)
 
 ### Option A: online logging
 

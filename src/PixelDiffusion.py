@@ -1,5 +1,6 @@
 import numpy as np
 import math
+from pathlib import Path
 import pytorch_lightning as pl
 import torch
 import torch.nn.functional as F
@@ -78,7 +79,10 @@ class PixelDiffusionConditional(pl.LightningModule):
                  ema_enabled=False,
                  ema_beta=0.9999,
                  ema_update_every=1,
-                 ema_update_after_step=0):
+                 ema_update_after_step=0,
+                 wandb_save_config_file=True,
+                 config_path=None,
+                 wandb_config_artifact_name=None):
 
         super().__init__()
         self.lr = lr
@@ -89,7 +93,10 @@ class PixelDiffusionConditional(pl.LightningModule):
         self.ema_update_every = int(ema_update_every)
         self.ema_update_after_step = int(ema_update_after_step)
         self.ema_step = 0
-
+        self.wandb_save_config_file = bool(wandb_save_config_file)
+        self.config_path = config_path
+        self.wandb_config_artifact_name = wandb_config_artifact_name
+        self._wandb_config_saved = False
         self.loss_name = loss_fn.lower()
         if self.loss_name == 'mse':
             resolved_loss_fn = None
@@ -126,6 +133,39 @@ class PixelDiffusionConditional(pl.LightningModule):
             else None
         )
 
+    def on_fit_start(self):
+        """Upload the active config file once at fit start (global zero only)."""
+        if (
+                not self.wandb_save_config_file
+                or self._wandb_config_saved
+                or self.logger is None
+                or self.trainer is None
+                or not self.trainer.is_global_zero
+                or not hasattr(self.logger, "experiment")
+        ):
+            return
+        self._save_config_to_wandb()
+
+    def _save_config_to_wandb(self):
+        """Upload the exact config YAML used for this run to W&B."""
+        if self.config_path is None:
+            return
+        config_file = Path(self.config_path).expanduser().resolve()
+        if not config_file.exists():
+            return
+
+        run = self.logger.experiment
+        run.save(str(config_file), policy="now")
+
+        import wandb
+        artifact = wandb.Artifact(
+            name=self.wandb_config_artifact_name or f"config-{run.id}",
+            type="config",
+            description="Training config used for this run.",
+        )
+        artifact.add_file(str(config_file), name=config_file.name)
+        run.log_artifact(artifact)
+        self._wandb_config_saved = True
 
     @torch.no_grad()
     def forward(self, *args, **kwargs):
