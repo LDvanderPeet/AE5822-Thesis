@@ -19,8 +19,8 @@ data:
     test: 0.1
 
 model:
-  in_channels: 2  # Channels in the conditional input x.
-  out_channels: 1  # Channels in the reconstruction target y.
+  in_channels: 4  # Channels in the conditional input x.
+  out_channels: 2  # Channels in the reconstruction target y.
   num_timesteps: 1000  # Number of diffusion denoising steps.
   schedule: cosine  # Beta schedule variant for the forward process.
   loss_fn: mae # 'mse' (L2), 'mae' (L1), or 'hybrid' (MS-SSIM for low t and L1/L2 otherwise).
@@ -35,8 +35,8 @@ model:
   unet:
     dim: 48  # Base UNet width. Previous setting was 64; 48 reduces parameter count to about half (30M instead of 55M).
     dim_mults: [1, 2, 4, 8]  # Width multipliers per UNet level.
-    channels: 3  # Input channels to UNet; for conditional concat this is usually in_channels + out_channels.
-    out_dim: 1  # UNet output channels; should match model.out_channels.
+    channels: 6  # Input channels to UNet; for conditional concat this is usually in_channels + out_channels.
+    out_dim: 2  # UNet output channels; should match model.out_channels.
 
 optimization:
   lr: 0.00005  # AdamW learning rate.

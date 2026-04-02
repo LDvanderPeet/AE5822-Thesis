@@ -1,4 +1,5 @@
 import numpy as np
+import math
 import pytorch_lightning as pl
 import torch
 import torch.nn.functional as F
@@ -133,12 +134,15 @@ class PixelDiffusionConditional(pl.LightningModule):
 
     def input_T(self, input):
         # Model internally expects values in [-1, 1].
-        return (input.clip(0, 1).mul(2)).sub(1)
+        # return (input.clip(0, 1).mul(2)).sub(1)
+        return input.clamp(-1, 1)
+
 
     def output_T(self, input):
         # Inverse mapping from [-1, 1] back to [0, 1] for visualization/metrics.
-        return input.add(1).div(2)
-    
+        # return input.add(1).div(2)
+        return input.clamp(-1, 1)
+
     def training_step(self, batch, batch_idx):   
         """Lightning train hook for conditional diffusion."""
         input,output=batch
@@ -168,16 +172,18 @@ class PixelDiffusionConditional(pl.LightningModule):
 
         if batch_idx == 0:
             pred_batch = self.predict_step(batch, batch_idx)
-            psnr, ssim, l1 = self._compute_reconstruction_metrics(pred_batch, output)
+            psnr, ssim, l1, phase_coh = self._compute_reconstruction_metrics(pred_batch, output)
             self.log('val_recon_psnr', psnr, on_step=False, on_epoch=True, prog_bar=True, logger=True)
             self.log('val_recon_ssim', ssim, on_step=False, on_epoch=True, prog_bar=True, logger=True)
             self.log('val_recon_l1', l1, on_step=False, on_epoch=True, prog_bar=True, logger=True)
+            self.log('val_recon_phase_coherence', phase_coh, on_step=False, on_epoch=True, prog_bar=True, logger=True)
             ema_pred_batch = self._predict_with_ema_model(input)
             if ema_pred_batch is not None:
-                ema_psnr, ema_ssim, ema_l1 = self._compute_reconstruction_metrics(ema_pred_batch, output)
+                ema_psnr, ema_ssim, ema_l1, ema_phase_coh = self._compute_reconstruction_metrics(ema_pred_batch, output)
                 self.log('val_recon_psnr_ema', ema_psnr, on_step=False, on_epoch=True, prog_bar=True, logger=True)
                 self.log('val_recon_ssim_ema', ema_ssim, on_step=False, on_epoch=True, prog_bar=True, logger=True)
                 self.log('val_recon_l1_ema', ema_l1, on_step=False, on_epoch=True, prog_bar=True, logger=True)
+                ema_psnr, ema_ssim, ema_l1, ema_phase_coh = self._compute_reconstruction_metrics(ema_pred_batch, output)
             self._log_val_reconstruction(input, pred_batch, output, ema_pred_batch=ema_pred_batch)
 
         return loss
@@ -221,13 +227,13 @@ class PixelDiffusionConditional(pl.LightningModule):
         image = tensor.detach().float().cpu()
 
         if image.shape[0] >= 2:
-            mag = torch.sqrt(image[0].square() + image[1].square()).numpy()
+            global_max = 2.5
+            log_max = np.log1p(global_max)
+            i = torch.sign(image[0]) * (torch.expm1(torch.abs(image[0]) * log_max))
+            q = torch.sign(image[1]) * (torch.expm1(torch.abs(image[1]) * log_max))
+            mag = torch.sqrt(i.square() + q.square()).numpy()
         else:
             mag = image[0].abs().numpy()
-
-        global_max = 2.5
-        log_max = np.log1p(global_max)
-        mag = np.exp(mag * log_max) - 1.0
 
         scale = float(np.mean(mag) + 3.0 * np.std(mag))
         if scale <= 0.0:
@@ -236,37 +242,103 @@ class PixelDiffusionConditional(pl.LightningModule):
         return mag, 'gray'
 
     def _compute_reconstruction_metrics(self, pred_batch, target_batch):
-        """Compute batch-level reconstruction metrics on [0, 1] tensors."""
-        pred = pred_batch.detach().float().clamp(0, 1)
-        target = target_batch.detach().float().clamp(0, 1)
+        """Compute batch-level reconstruction metrics from [-1, 1] tensors."""
+        pred = pred_batch.detach().float().clamp(-1, 1)
+        target = target_batch.detach().float().clamp(-1, 1)
 
         l1 = F.l1_loss(pred, target)
 
-        pred_np = pred.cpu().numpy()
-        target_np = target.cpu().numpy()
+        pred_cplx = self._to_complex_channels(pred)
+        target_cplx = self._to_complex_channels(target)
+
+        pred_mag = torch.abs(pred_cplx)
+        target_mag = torch.abs(target_cplx)
+
+        pred_mag_np = pred_mag.cpu().numpy()
+        target_mag_np = target_mag.cpu().numpy()
 
         psnr_vals = []
         ssim_vals = []
-        for i in range(pred_np.shape[0]):
-            p = pred_np[i]
-            t = target_np[i]
-            psnr_vals.append(peak_signal_noise_ratio(t, p, data_range=1.0))
+        phase_coh_vals = []
+
+        for i in range(pred_mag_np.shape[0]):
+            p_mag = pred_mag_np[i]
+            t_mag = target_mag_np[i]
+
+            psnr_vals.append(peak_signal_noise_ratio(t_mag, p_mag, data_range=math.sqrt(2)))
+
             ssim_vals.append(
                 structural_similarity(
-                    t,
-                    p,
-                    data_range=1.0,
+                    t_mag,
+                    p_mag,
+                    data_range=math.sqrt(2),
                     channel_axis=0,
                     win_size=11,
                     gaussian_weights=True,
                     sigma=1.5,
                 )
             )
+            phase_coh_vals.append(self._phase_coherence_mean(pred_cplx[i], target_cplx[i]))
 
         psnr = torch.tensor(psnr_vals, device=pred.device, dtype=pred.dtype).mean()
         ssim = torch.tensor(ssim_vals, device=pred.device, dtype=pred.dtype).mean()
+        phase_coh = torch.tensor(phase_coh_vals, device=pred.device, dtype=pred.dtype).mean()
 
-        return psnr, ssim, l1
+        return psnr, ssim, l1, phase_coh
+
+    @staticmethod
+    def _to_complex_channels(tensor: torch.Tensor) -> torch.Tensor:
+        if torch.is_complex(tensor):
+            return tensor
+
+        # Dimension-agnostic channel slicing
+        if tensor.ndim == 4:  # [B, C, H, W]
+            channel_dim = 1
+        elif tensor.ndim == 3:  # [C, H, W]
+            channel_dim = 0
+        else:
+            return torch.complex(tensor, torch.zeros_like(tensor))
+
+        num_channels = tensor.shape[channel_dim]
+
+        if num_channels >= 2 and num_channels % 2 == 0:
+            if tensor.ndim == 4:
+                real = tensor[:, 0::2, :, :]
+                imag = tensor[:, 1::2, :, :]
+            else:
+                real = tensor[0::2, :, :]
+                imag = tensor[1::2, :, :]
+            return torch.complex(real, imag)
+
+        return torch.complex(tensor, torch.zeros_like(tensor))
+
+    @staticmethod
+    def _phase_coherence_mean(pred_cplx: torch.Tensor, target_cplx: torch.Tensor) -> float:
+        eps = 1e-8
+        interferogram = pred_cplx * torch.conj(target_cplx)
+        pred_pow = torch.abs(pred_cplx) ** 2
+        target_pow = torch.abs(target_cplx) ** 2
+
+        kernel = torch.ones((1, 1, 5, 5), device=pred_cplx.device, dtype=pred_pow.dtype)
+        norm = 25.0
+
+        def _mean_filter(x: torch.Tensor) -> torch.Tensor:
+            original_shape = x.shape
+            # Safe 4D reshape prevents the 5D crash
+            x_reshaped = x.view(-1, 1, original_shape[-2], original_shape[-1])
+            filtered = F.conv2d(x_reshaped, kernel, padding=2) / norm
+            return filtered.view(original_shape)
+
+        e_int_re = _mean_filter(interferogram.real)
+        e_int_im = _mean_filter(interferogram.imag)
+        e_pred = _mean_filter(pred_pow)
+        e_target = _mean_filter(target_pow)
+
+        numerator = torch.sqrt(e_int_re ** 2 + e_int_im ** 2)
+        denominator = torch.sqrt(torch.clamp(e_pred * e_target, min=eps))
+        coherence = numerator / torch.clamp(denominator, min=eps)
+        return float(torch.mean(coherence).item())
+
 
     def _log_val_reconstruction(self, input_batch, pred_batch, target_batch, ema_pred_batch=None):
         """Log a single `x | pred_regular | pred_ema | y` reconstruction panel to W&B."""
