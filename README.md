@@ -1,29 +1,79 @@
-# Conditional Pixel Diffusion (Minimal Scaffold)
+# Conditional Pixel Diffusion for SAR Subaperture Reconstruction
 
 This repo is a minimal training scaffold for **conditional pixel-space diffusion** using:
-- `PixelDiffusionConditional` as the Lightning model
+- `PixelDiffusion` as the Lightning model
 - `DenoisingDiffusionProcess` internals for the diffusion model
-- a placeholder `data/` pipeline that currently returns random tensors
+- `dataset/` containing the raw full aperture (FA) and subaperture (SA) data
+- `train.py` as the Pytorch Lightning training pipeline for conditional pixel-space diffusion on SAR subaperture data
 
-It is intentionally not production-ready yet. This README explains what to change to make it fully functional on real data.
+At a high level, the model learns to map: 
+- **condition input** `x`: retained subaperture channels
+- to **target output** `y`: the original full aperture
 
-## Current State
+using a conditional denoising diffusion process with a configurable U-Net backbone.
 
-What already works:
-- Training loop in [`train.py`](/work/code/dif_img_rec/train.py)
-- Config-driven setup via [`configs/config.yaml`](/work/code/dif_img_rec/configs/config.yaml)
-- Conditional diffusion model wiring
-- Validation logging to W&B:
-  - `train_loss`, `val_loss`
-  - one reconstructed example (`x`, `pred`, `y`) as a matplotlib figure
-  - reconstruction metrics on that prediction: `val_recon_psnr`, `val_recon_ssim`, `val_recon_l1`
+--- 
+## Current State (April 2026)
 
-What is still placeholder:
-- Dataset/data module in [`data/`](/work/code/dif_img_rec/data)
-    - defaults to random `(x, y)` with shape `(2, 128, 128)` and fixed length `(1000)`
-    - can now auto-switch to the SAR loader in `data/sardataset.py` when `data.root_dir` and `data.subaperture_config` are provided in config
+### What is implemented:
+- End-to-end training with PyTorch Lightning (`train.py`).
+- Config-driven setup for data/model/trainer (`configs/config.yaml`).
+- Conditional diffusion model (`src/PixelDiffusion.py`) with:
+  - configurable noise schedule (`linear` or `cosine`),
+  - selectable loss (`mse`, `mae`, or hybrid MS-SSIM + base loss),
+  - optional EMA shadow model for evaluation logging.
+- SAR data backend via `SafetensorSARDataset` wrapped by `PairedImageDataset`.
+- Validation-time reconstruction metrics/logging:
+  - `val_loss`,
+  - `val_recon_psnr`, `val_recon_ssim`, `val_recon_l1`, `val_recon_phase_coherence`,
+  - optional EMA versions of reconstruction metrics when EMA is enabled.
+- Separate evaluation script (`evaluate.py`) for SAR-focused analyses (IRF, KDE distance, phase coherence, etc.).
 
-## 1. Install Requirements
+---
+
+## Repository Layout
+- `train.py` — training entrypoint.
+- `evaluate.py` — offline evaluation script for saved checkpoints.
+- `configs/config.yaml` — main runtime configuration.
+- `src/PixelDiffusion.py` — LightningModule and training/validation logic.
+- `data/datamodule.py` — Lightning DataModule.
+- `data/dataset.py` — adapter dataset that selects backend/fallback.
+- `data/finaldataset.py` — SAR dataset implementation used in normal runs.
+
+---
+
+## Data Interface
+The training/evaluation model expects each batch to be:
+```python
+return x, y 
+```
+with shape `[B, C, H, W]` for both tensors.
+
+In the current SAR pipeline:
+- channels are built from interleaved magnitude/phase components,
+- values are normalised/clamped into `[-1, 1]` inside the dataset backend,
+- model `input_T` / `output_T` currently map to `[-1, 1]` (no additional remapping).
+
+---
+
+## Configuration Notes
+Main config: `configs/config.yaml`.
+Important fields:
+- `data.root_dir`: path to patch dataset root.
+- `data.subaperture_config`:
+  - `input_indices`
+  - `output_indices`
+  - `active_polarizations`
+- `model.in_channels` / `model.out_channels`: must match prepared dataset channels.
+- `model.unet.channels`: typically `in_channels + out_channels` for concatenated conditional diffusion input.
+- `model.loss_fn`: `mse`, `mae`, or `hybrid`.
+- `model.ema.enabled`: enables EMA shadow model + EMA validation metrics.
+- `trainer.checkpointing`: controls saved checkpoints (`save_top_k`, `save_last`, etc.).
+
+---
+
+
+## Install Requirements
 
 Use your preferred environment manager and install dependencies from `requirements.txt`:
 
@@ -31,48 +81,20 @@ Use your preferred environment manager and install dependencies from `requiremen
 pip install -r requirements.txt
 ```
 
-If you do not want W&B, you can still run with offline/disabled mode (see section 5).
+If you do not want W&B, you can still run with offline/disabled mode.
 
-## 2. Implement Real Dataset + DataModule
+---
 
-Edit these files:
-- [`data/dataset.py`](/work/code/dif_img_rec/data/dataset.py)
-- [`data/datamodule.py`](/work/code/dif_img_rec/data/datamodule.py)
+## Train
 
-### What to implement
-
-In `PairedImageDataset`:
-- load your paired samples `(x, y)` from disk
-- return tensors shaped `[C, H, W]`
-- keep `__getitem__` output exactly as:
-
-```python
-return x, y
+```bash
+python3 train.py --config configs/config.yaml
 ```
 
-In `PairedDataModule`:
-- replace placeholder dataset construction in `setup()` with your train/val/test datasets
-- keep dataloader settings wired from config (`batch_size`, `num_workers`, `pin_memory`)
-
-### Important shape/channel rule
-
-Model input/output channels come from config:
-- `model.in_channels` = channels for `x` (condition)
-- `model.out_channels` = channels for `y` (target)
-
-Your dataset must match this.
-
-## 3. Implement/Verify Normalization
-
-Current model logic in [`src/PixelDiffusion.py`](/work/code/dif_img_rec/src/PixelDiffusion.py):
-- `input_T`: assumes tensors are in `[0, 1]`, then maps to `[-1, 1]`
-- `output_T`: maps model output from `[-1, 1]` back to `[0, 1]`
-
-So your dataset should output `x` and `y` in `[0, 1]`.
-
-If your data uses different scaling (for example z-score), you should adapt `input_T`/`output_T` accordingly.
-
-## 4. Edit Config
+Resume from a checkpoint:
+```bash
+python3 train.py --config configs/config.yaml --resume-from-ckpt checkpoints/last.ckpt
+```
 
 Main config file: [`configs/config.yaml`](/work/code/dif_img_rec/configs/config.yaml)
 
@@ -139,13 +161,37 @@ trainer:
     auto_inset_metric_name: false
 ```
 
-Resume a stopped run from any saved checkpoint:
+---
+
+## Evaluate a Saved Checkpoint
 
 ```bash
-python3 train.py --config configs/config.yaml --resume-from-ckpt checkpoints/last.ckpt
+python3 evaluate.py \
+  --config config/config.yaml \
+  --checkpoint /path/to/model.ckpt \
+  --split test
 ```
 
-## 5. Optional W&B Setup
+Reported metrics:
+- `psf_azimuth_rel_err`: relative 3 dB width error in azimuth.
+- `psf_range_rel_err`: relative 3 dB width error in range.
+- `enl_rel_err`: relative ENL error on intensity.
+- `kde_js_disntance`: Jensen-Shannon distance between KDEs of reconstructed vs target intensity.
+- `rel_phase_mae_rad`: mean absolute wrapped error of relative phase (radians).
+- `rel_phase_coherence`: circular coherence of relative phase errors (1.0 is best).
+
+Optional JSON output:
+```bash
+python3 evaluate.py \
+  --config config/config.yaml \
+  --checkpoint /path/to/model.ckpt \
+  --split test \
+  --output-json reports/sar_eval.json
+```
+
+---
+## Logging
+Wights & Biases settings are under `loggingin.wandb` in config.
 
 Config section:
 
@@ -178,93 +224,12 @@ Set env var before run:
 ```bash
 export WANDB_DISABLED=true
 ```
+---
 
-## 6. Run Training
+## Practical Checklist Before Long Training Runs
 
-```bash
-python3 train.py --config configs/config.yaml
-```
-
-## 7. Sanity Checklist Before Real Training
-
-- dataset returns `(x, y)` tensors, not file paths
-- tensors are float and normalized consistently
-- channel counts match config
-- first validation batch logs reconstruction image and metrics
-- loss decreases on a small overfit subset
-
-## 8. Evaluate a Saved Run/Checkpoint
-
-Use `evaluate.py` to compute SAR-specific reconstruction metrics for a saved checkpoint:
-
-```bash
-python3 evaluate.py \ 
-  --config configs/config.yaml \
-  --checkpoint /path/to/model.ckpt \
-  --split test
-```
-
-Reported metrics:
-- `psf_azimuth_rel_err`: relative 3 dB width error in azimuth.
-- `psf_range_rel_err`: relative 3 dB width error in range.
-- `enl_rel_err`: relative ENL error on intensity.
-- `kde_js_disntance`: Jensen-Shannon distance between KDEs of reconstructed vs target intensity.
-- `rel_phase_mae_rad`: mean absolute wrapped error of relative phase (radians).
-- `rel_phase_coherence`: circular coherence of relative phase errors (1.0 is best).
-
-You can optionally save the summary to disk:
-
-```bash
-python3 evaluate.py --config configs.yaml --checkpoint /path/to/model.ckpt --output-json reports/sar_eval.json
-```
-
-## Project Files
-
-- Training entrypoint: [`train.py`](/work/code/dif_img_rec/train.py)
-- Config: [`configs/config.yaml`](/work/code/dif_img_rec/configs/config.yaml)
-- Dataset scaffold: [`data/dataset.py`](/work/code/dif_img_rec/data/dataset.py)
-- DataModule scaffold: [`data/datamodule.py`](/work/code/dif_img_rec/data/datamodule.py)
-- Lightning model: [`src/PixelDiffusion.py`](/work/code/dif_img_rec/src/PixelDiffusion.py)
-- Diffusion internals: [`src/DenoisingDiffusionProcess/`](/work/code/dif_img_rec/src/DenoisingDiffusionProcess)
-
-## Model Flow Chart (Inputs, Outputs, and Structure)
-
-```mermaid
-flowchart TD
-    A[Dataset / DataModule<br/>returns paired tensors (x, y)<br/>shape: [B, C, H, W], normalized to [0,1]] --> B[PixelDiffusionConditional]
-    B --> C[input_T<br/>maps x,y from [0,1] to [-1,1]]
-
-    C --> D[Training path]
-    C --> E[Inference / Predict path]
-
-    subgraph TRAIN[Training path]
-        D --> T1[Sample random timestep t]
-        T1 --> T2[GaussianForwardProcess<br/>q(y_t | y_0, t)<br/>adds noise to target y]
-        T2 --> T3[Concat condition and noisy target<br/>model_input = concat(y_t, x)]
-        T3 --> T4[U-Net ConvNeXt backbone<br/>predicts noise_hat]
-        T4 --> T5[Loss(noise, noise_hat, t)<br/>MSE or Hybrid]
-        T5 --> T6[Backprop + AdamW update]
-    end
-
-    subgraph INFER[Inference / Predict path]
-        E --> I1[Initialize x_T ~ N(0, I)]
-        I1 --> I2[For t = T-1 ... 0]
-        I2 --> I3[Concat current sample with condition<br/>model_input = concat(x_t, x)]
-        I3 --> I4[U-Net ConvNeXt predicts noise z_t]
-        I4 --> I5[Sampler step (DDPM/DDIM)<br/>x_{t-1} = p(x_{t-1} | x_t, z_t)]
-        I5 --> I2
-        I2 --> I6[Final reconstruction x_0]
-        I6 --> I7[output_T<br/>maps [-1,1] back to [0,1]]
-        I7 --> I8[Model output: pred]
-    end
-
-    T6 --> M[Validation metrics/logging<br/>train_loss, val_loss, PSNR, SSIM, L1]
-    I8 --> M
-```
-
-### Quick shape/channel summary
-
-- **Input condition**: `x` with `model.in_channels` channels.
-- **Target/output**: `y` with `model.out_channels` channels.
-- **U-Net input channels**: typically `in_channels + out_channels` (concat condition + current noisy sample).
-- **U-Net output channels**: `out_channels` (predicted noise for generated channels).
+- Confirm `data.root_dir` exists and contains expected patch structure.
+- Verify `model.in_channels` / `model.out_channels` match generated tensors.
+- Ensure `model.unet.channels == in_channels + out_channels` (unless intentionally different).
+- Run a short sanity run and check validation reconstruction metrics/logged images.
+- Validate checkpoint save path and naming in `trainer.checkpointing`.
