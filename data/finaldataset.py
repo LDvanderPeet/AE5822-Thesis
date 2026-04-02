@@ -38,10 +38,10 @@ def tfm_dihedral(x, k):
 
 def _normalize(x, y, global_max=4257):
     """
-    Applies unit sphere normalization based on the 99th percentile of magnitude.
+    Normalizes real/imaginary channels with a symmetric log mapping.
 
-    Both input and target are scaled by the same factor derived from the input (x) to preserve relative intensity
-    relationship.
+    The data now contains signed in-phase/quadrature components, so we preserve sign and compress dynamic range via:
+        sign(v) * log1p(abs(v)) / log1p(global_max)
 
     Parameters
     ----------
@@ -53,10 +53,10 @@ def _normalize(x, y, global_max=4257):
     x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
     y = torch.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
 
-    x = torch.log1p(x) / np.log1p(global_max)
-    y = torch.log1p(y) / np.log1p(global_max)
+    x = torch.sign(x) * torch.log1p(torch.abs(x)) / np.log1p(global_max)
+    y = torch.sign(y) * torch.log1p(torch.abs(y)) / np.log1p(global_max)
 
-    return torch.clamp(x, 0.0, 1.0), torch.clamp(y, 0.0, 1.0)
+    return torch.clamp(x, -1.0, 1.0), torch.clamp(y, -1.0, 1.0)
 
 
 class SafetensorSARDataset(Dataset):
@@ -167,13 +167,13 @@ class SafetensorSARDataset(Dataset):
             if "VV" in self.requested_pols:
                 i_vv = full_tensor[base_offset]
                 q_vv = full_tensor[base_offset + 1]
-                mag_vv = torch.sqrt(i_vv ** 2 + q_vv ** 2)
-                selected.append(mag_vv.unsqueeze(0))
+                selected.append(i_vv.unsqueeze(0))
+                selected.append(q_vv.unsqueeze(0))
             if "VH" in self.requested_pols:
                 i_vh = full_tensor[base_offset + 2]
                 q_vh = full_tensor[base_offset + 3]
-                mag_vh = torch.sqrt(i_vh ** 2 + q_vh ** 2)
-                selected.append(mag_vh.unsqueeze(0))
+                selected.append(i_vh.unsqueeze(0))
+                selected.append(q_vh.unsqueeze(0))
 
         return torch.cat(selected, dim=0)
 
