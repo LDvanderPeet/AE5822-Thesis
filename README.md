@@ -1,6 +1,6 @@
 # Conditional Pixel Diffusion for SAR Subaperture Reconstruction
 
-This repo is a minimal training scaffold for **conditional pixel-space diffusion** using:
+This repository contains a PyTorch Lightning training pipeline for **conditional pixel-space diffusion** on SAR subaperture data, using:
 - `PixelDiffusion` as the Lightning model
 - `DenoisingDiffusionProcess` internals for the diffusion model
 - `dataset/` containing the raw full aperture (FA) and subaperture (SA) data
