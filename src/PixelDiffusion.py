@@ -229,6 +229,7 @@ class PixelDiffusionConditional(pl.LightningModule):
                 self.log('val_recon_l1_ema', ema_l1, on_step=False, on_epoch=True, prog_bar=True, logger=True)
                 ema_psnr, ema_ssim, ema_l1, ema_phase_coh = self._compute_reconstruction_metrics(ema_pred_batch, output)
             self._log_val_reconstruction(input, pred_batch, output, ema_pred_batch=ema_pred_batch)
+            self._log_val_target_histograms(output)
 
         return loss
 
@@ -421,6 +422,32 @@ class PixelDiffusionConditional(pl.LightningModule):
         )
         plt.close(fig)
 
+    def _log_val_target_histograms(self, target_batch: torch.Tensor):
+        """Log real/imag/magnitude histograms for the first validation target image."""
+        if self.logger is None or self.trainer is None or not self.trainer.is_global_zero:
+            return
+
+        try:
+            import wandb
+        except ImportError:
+            return
+
+        target_complex = self._to_complex_channels(target_batch.detach().float())
+        sample = target_complex[0]
+
+        real_vals = sample.real.flatten().cpu().numpy()
+        imag_vals = sample.imag.flatten().cpu().numpy()
+        mag_vals = torch.abs(sample).flatten().cpu().numpy()
+
+        self.logger.experiment.log(
+            {
+                "val/hist_real": wandb.Histogram(real_vals),
+                "val/hist_imag": wandb.Histogram(imag_vals),
+                "val/hist_magnitude": wandb.Histogram(mag_vals),
+            },
+            step=self.global_step,
+        )
+
     def _build_input_panels(self, input_tensor: torch.Tensor):
         """Split condition channels into per-input images and attach human-readable labels."""
         image = input_tensor.detach().float().cpu()
@@ -452,4 +479,3 @@ class PixelDiffusionConditional(pl.LightningModule):
             img, cmap = self._to_plot_image(image[start:end])
             panels.append((img, cmap, label))
         return panels
-
