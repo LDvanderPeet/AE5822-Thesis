@@ -216,18 +216,22 @@ class PixelDiffusionConditional(pl.LightningModule):
 
         if batch_idx == 0:
             pred_batch = self.predict_step(batch, batch_idx)
-            psnr, ssim, l1, phase_coh = self._compute_reconstruction_metrics(pred_batch, output)
+            psnr, ssim, l1, phase_coh, phase_err = self._compute_reconstruction_metrics(pred_batch, output)
             self.log('val_recon_psnr', psnr, on_step=False, on_epoch=True, prog_bar=True, logger=True)
             self.log('val_recon_ssim', ssim, on_step=False, on_epoch=True, prog_bar=True, logger=True)
             self.log('val_recon_l1', l1, on_step=False, on_epoch=True, prog_bar=True, logger=True)
             self.log('val_recon_phase_coherence', phase_coh, on_step=False, on_epoch=True, prog_bar=True, logger=True)
+            self.log('val_recon_phase_error', phase_err, on_step=False, on_epoch=True, prog_bar=True, logger=True)
             ema_pred_batch = self._predict_with_ema_model(input)
             if ema_pred_batch is not None:
-                ema_psnr, ema_ssim, ema_l1, ema_phase_coh = self._compute_reconstruction_metrics(ema_pred_batch, output)
+                ema_psnr, ema_ssim, ema_l1, ema_phase_coh, ema_phase_err = self._compute_reconstruction_metrics(ema_pred_batch, output)
                 self.log('val_recon_psnr_ema', ema_psnr, on_step=False, on_epoch=True, prog_bar=True, logger=True)
                 self.log('val_recon_ssim_ema', ema_ssim, on_step=False, on_epoch=True, prog_bar=True, logger=True)
                 self.log('val_recon_l1_ema', ema_l1, on_step=False, on_epoch=True, prog_bar=True, logger=True)
-                ema_psnr, ema_ssim, ema_l1, ema_phase_coh = self._compute_reconstruction_metrics(ema_pred_batch, output)
+                self.log('val_recon_phase_coherence_ema', ema_phase_coh, on_step=False, on_epoch=True, prog_bar=True,
+                         logger=True)
+                self.log('val_recon_phase_error_ema', ema_phase_err, on_step=False, on_epoch=True, prog_bar=True,
+                         logger=True)
             self._log_val_reconstruction(input, pred_batch, output, ema_pred_batch=ema_pred_batch)
             self._log_val_target_histograms(output)
 
@@ -305,6 +309,7 @@ class PixelDiffusionConditional(pl.LightningModule):
         psnr_vals = []
         ssim_vals = []
         phase_coh_vals = []
+        phase_err_vals = []
 
         for i in range(pred_mag_np.shape[0]):
             p_mag = pred_mag_np[i]
@@ -324,12 +329,14 @@ class PixelDiffusionConditional(pl.LightningModule):
                 )
             )
             phase_coh_vals.append(self._phase_coherence_mean(pred_cplx[i], target_cplx[i]))
+            phase_err_vals.append(self._phase_error_mean_abs(pred_cplx[i], target_cplx[i]))
 
         psnr = torch.tensor(psnr_vals, device=pred.device, dtype=pred.dtype).mean()
         ssim = torch.tensor(ssim_vals, device=pred.device, dtype=pred.dtype).mean()
         phase_coh = torch.tensor(phase_coh_vals, device=pred.device, dtype=pred.dtype).mean()
+        phase_err = torch.tensor(phase_err_vals, device=pred.device, dtype=pred.dtype).mean()
 
-        return psnr, ssim, l1, phase_coh
+        return psnr, ssim, l1, phase_coh, phase_err
 
     @staticmethod
     def _to_complex_channels(tensor: torch.Tensor) -> torch.Tensor:
@@ -383,6 +390,11 @@ class PixelDiffusionConditional(pl.LightningModule):
         denominator = torch.sqrt(torch.clamp(e_pred * e_target, min=eps))
         coherence = numerator / torch.clamp(denominator, min=eps)
         return float(torch.mean(coherence).item())
+
+    @staticmethod
+    def _phase_error_mean_abs(pred_cplx: torch.Tensor, target_cplx: torch.Tensor) -> float:
+        phase_diff = torch.angle(pred_cplx * torch.conj(target_cplx))
+        return float(torch.mean(torch.abs(phase_diff)).item())
 
 
     def _log_val_reconstruction(self, input_batch, pred_batch, target_batch, ema_pred_batch=None):
