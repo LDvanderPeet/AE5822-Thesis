@@ -53,11 +53,17 @@ def main() -> None:
     unet_cfg = model_cfg.get("unet", {})
     ema_cfg = model_cfg.get("ema", {})
     wandb_cfg = config.get("logging", {}).get("wandb", {})
+    data_cfg = config.get("data", {})
+    sa_cfg = data_cfg.get("subaperture_config", {}) if isinstance(data_cfg, dict) else {}
+    input_indices = sa_cfg.get("input_indices", [])
+    input_condition_labels = [f"SA{int(idx)}" if int(idx) > 0 else "FA" for idx in input_indices]
 
     # This is the Lightning model used for training and validation.
     model = PixelDiffusionConditional(
         condition_channels=model_cfg.get("in_channels", 2),
         generated_channels=model_cfg.get("out_channels", 2),
+        input_condition_labels=input_condition_labels if input_condition_labels else None,
+        target_label="FA",
         num_timesteps=model_cfg.get("num_timesteps", 1000),
         schedule=model_cfg.get("schedule", "linear"),
         noise_offset=model_cfg.get("noise_offset", 0),

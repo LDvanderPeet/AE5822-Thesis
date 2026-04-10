@@ -45,11 +45,17 @@ def build_model_from_config(config: dict[str, Any], checkpoint_path: str, device
     lr_sched_cfg = opt_cfg.get("reduce_lr_on_plateau", {})
     unet_cfg = model_cfg.get("unet", {})
     ema_cfg = model_cfg.get("ema", {})
+    data_cfg = config.get("data", {})
+    sa_cfg = data_cfg.get("subaperture_config", {}) if isinstance(data_cfg, dict) else {}
+    input_indices = sa_cfg.get("input_indices", [])
+    input_condition_labels = [f"SA{int(idx)}" if int(idx) > 0 else "FA" for idx in input_indices]
 
     model = PixelDiffusionConditional.load_from_checkpoint(
         checkpoint_path,
         condition_channels=model_cfg.get("in_channels", 2),
         generated_channels=model_cfg.get("out_channels", 2),
+        input_condition_labels=input_condition_labels if input_condition_labels else None,
+        target_label="FA",
         num_timesteps=model_cfg.get("num_timesteps", 1000),
         schedule=model_cfg.get("schedule", "linear"),
         noise_offset=model_cfg.get("noise_offset", 0.0),

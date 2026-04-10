@@ -63,6 +63,8 @@ class PixelDiffusionConditional(pl.LightningModule):
     def __init__(self,
                  condition_channels=3,
                  generated_channels=3,
+                 input_condition_labels=None,
+                 target_label="FA",
                  num_timesteps=1000,
                  schedule='linear',
                  noise_offset=0.0,
@@ -98,6 +100,8 @@ class PixelDiffusionConditional(pl.LightningModule):
         self.wandb_config_artifact_name = wandb_config_artifact_name
         self._wandb_config_saved = False
         self.loss_name = loss_fn.lower()
+        self.input_condition_labels = list(input_condition_labels) if input_condition_labels is not None else None
+        self.target_label = str(target_label)
         if self.loss_name == 'mse':
             resolved_loss_fn = None
         elif self.loss_name == 'hybrid':
@@ -381,7 +385,7 @@ class PixelDiffusionConditional(pl.LightningModule):
 
 
     def _log_val_reconstruction(self, input_batch, pred_batch, target_batch, ema_pred_batch=None):
-        """Log a single `x | pred_regular | pred_ema | y` reconstruction panel to W&B."""
+        """Log validation reconstruction panels for inputs, prediction(s), and target."""
         if self.logger is None or self.trainer is None or not self.trainer.is_global_zero:
             return
 
@@ -391,32 +395,24 @@ class PixelDiffusionConditional(pl.LightningModule):
         except ImportError:
             return
 
-        x_img, x_cmap = self._to_plot_image(input_batch[0])
         pred_img, pred_cmap = self._to_plot_image(pred_batch[0])
         y_img, y_cmap = self._to_plot_image(target_batch[0])
+        input_panels = self._build_input_panels(input_batch[0])
+        plot_items = [*input_panels, (pred_img, pred_cmap, f"{self.target_label}_pred")]
 
         if ema_pred_batch is not None:
             ema_img, ema_cmap = self._to_plot_image(ema_pred_batch[0])
-            fig, axes = plt.subplots(1, 4, figsize=(16, 4))
-        else:
-            fig, axes = plt.subplots(1, 3, figsize=(12, 4))
-        axes[0].imshow(x_img, cmap=x_cmap)
-        axes[0].set_title('x')
-        axes[0].axis('off')
-        axes[1].imshow(pred_img, cmap=pred_cmap)
-        axes[1].set_title('pred_regular')
-        axes[1].axis('off')
-        if ema_pred_batch is not None:
-            axes[2].imshow(ema_img, cmap=ema_cmap)
-            axes[2].set_title('pred_ema')
-            axes[2].axis('off')
-            axes[3].imshow(y_img, cmap=y_cmap)
-            axes[3].set_title('y')
-            axes[3].axis('off')
-        else:
-            axes[2].imshow(y_img, cmap=y_cmap)
-            axes[2].set_title('y')
-            axes[2].axis('off')
+            plot_items.append((ema_img, ema_cmap, f"{self.target_label}_pred_ema"))
+        plot_items.append((y_img, y_cmap, self.target_label))
+
+        num_plots = len(plot_items)
+        fig, axes = plt.subplots(1, num_plots, figsize=(4 * num_plots, 4))
+        if num_plots == 1:
+            axes = [axes]
+        for ax, (img, cmap, title) in zip(axes, plot_items):
+            ax.imshow(img, cmap=cmap)
+            ax.set_title(title)
+            ax.axis('off')
         fig.tight_layout()
 
         self.logger.experiment.log(
@@ -424,3 +420,36 @@ class PixelDiffusionConditional(pl.LightningModule):
             step=self.global_step,
         )
         plt.close(fig)
+
+    def _build_input_panels(self, input_tensor: torch.Tensor):
+        """Split condition channels into per-input images and attach human-readable labels."""
+        image = input_tensor.detach().float().cpu()
+
+        if self.input_condition_labels:
+            labels = self.input_condition_labels
+        else:
+            if image.shape[0] % 2 == 0:
+                num_inputs = max(1, image.shape[0] // 2)
+            else:
+                num_inputs = image.shape[0]
+            labels = [f"input_{i + 1}" for i in range(num_inputs)]
+
+        num_inputs = len(labels)
+        if num_inputs <= 1:
+            img, cmap = self._to_plot_image(image)
+            label = labels[0] if labels else "x"
+            return [(img, cmap, label)]
+
+        if image.shape[0] % num_inputs != 0:
+            img, cmap = self._to_plot_image(image)
+            return [(img, cmap, "x")]
+
+        channels_per_input = image.shape[0] // num_inputs
+        panels = []
+        for idx, label in enumerate(labels):
+            start = idx * channels_per_input
+            end = (idx + 1) * channels_per_input
+            img, cmap = self._to_plot_image(image[start:end])
+            panels.append((img, cmap, label))
+        return panels
+
