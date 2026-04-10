@@ -234,6 +234,7 @@ class PixelDiffusionConditional(pl.LightningModule):
                          logger=True)
             self._log_val_reconstruction(input, pred_batch, output, ema_pred_batch=ema_pred_batch)
             self._log_val_target_histograms(output)
+            self._log_val_magnitude_kde_db(pred_batch, output)
 
         return loss
 
@@ -459,6 +460,62 @@ class PixelDiffusionConditional(pl.LightningModule):
             },
             step=self.global_step,
         )
+
+    def _log_val_magnitude_kde_db(self, pred_batch: torch.Tensor, target_batch: torch.Tensor):
+        """Log KDE overlay of reconstruction vs reference magnitudes in dB for one validation image."""
+        if self.logger is None or self.trainer is None or not self.trainer.is_global_zero:
+            return
+
+        try:
+            import matplotlib.pyplot as plt
+            import wandb
+            from scipy.stats import gaussian_kde
+        except ImportError:
+            return
+
+        eps = 1e-8
+        max_samples = 200_000
+
+        pred_cplx = self._to_complex_channels(pred_batch.detach().float())[0]
+        target_cplx = self._to_complex_channels(target_batch.detach().float())[0]
+
+        pred_db = (20.0 * torch.log10(torch.clamp(torch.abs(pred_cplx), min=eps))).flatten().cpu().numpy()
+        target_db = (20.0 * torch.log10(torch.clamp(torch.abs(target_cplx), min=eps))).flatten().cpu().numpy()
+
+        if pred_db.size == 0 or target_db.size == 0:
+            return
+
+        if pred_db.size > max_samples:
+            idx = np.linspace(0, pred_db.size - 1, max_samples, dtype=int)
+            pred_db = pred_db[idx]
+        if target_db.size > max_samples:
+            idx = np.linspace(0, target_db.size - 1, max_samples, dtype=int)
+            target_db = target_db[idx]
+
+        lo = float(min(np.percentile(pred_db, 0.2), np.percentile(target_db, 0.2)))
+        hi = float(max(np.percentile(pred_db, 99.8), np.percentile(target_db, 99.8)))
+        if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+            return
+
+        grid = np.linspace(lo, hi, 512)
+        pred_kde = gaussian_kde(pred_db)(grid)
+        target_kde = gaussian_kde(target_db)(grid)
+
+        fig, ax = plt.subplots(figsize=(6, 4))
+        ax.plot(grid, target_kde, label=f"{self.target_label} (reference)", linewidth=2)
+        ax.plot(grid, pred_kde, label=f"{self.target_label}_pred (reconstruction)", linewidth=2)
+        ax.set_xlabel("Magnitude (dB)")
+        ax.set_ylabel("Density")
+        ax.set_title("Validation Magnitude KDE (dB)")
+        ax.grid(alpha=0.3, linestyle="--")
+        ax.legend()
+        fig.tight_layout()
+
+        self.logger.experiment.log(
+            {"val/magnitude_kde_db": wandb.Image(fig)},
+            step=self.global_step,
+        )
+        plt.close(fig)
 
     def _build_input_panels(self, input_tensor: torch.Tensor):
         """Split condition channels into per-input images and attach human-readable labels."""

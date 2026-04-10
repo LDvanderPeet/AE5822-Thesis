@@ -27,6 +27,7 @@ using a conditional denoising diffusion process with a configurable U-Net backbo
   - `val_loss`,
   - `val_recon_psnr`, `val_recon_ssim`, `val_recon_l1`, `val_recon_phase_coherence`, `val_recon_phase_error`,
   - first-validation-target histograms: `val/hist_real`, `val/hist_imag`, `val/hist_magnitude`,
+  - - first-validation-image magnitude KDE overlay in dB: `val/magnitude_kde_db`,
   - optional EMA versions of reconstruction metrics when EMA is enabled.
 - Separate evaluation script (`evaluate.py`) for SAR-focused analyses (IRF, KDE distance, phase coherence, etc.).
 
