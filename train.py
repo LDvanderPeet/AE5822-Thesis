@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 from pathlib import Path
 
 import pytorch_lightning as pl
@@ -53,6 +54,10 @@ def main() -> None:
     unet_cfg = model_cfg.get("unet", {})
     ema_cfg = model_cfg.get("ema", {})
     wandb_cfg = config.get("logging", {}).get("wandb", {})
+    run_name = wandb_cfg.get("name", "run")
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    wandb_local_dir = Path(wandb_cfg.get("save_dir", "logs")).expanduser / f"{timestamp}-{run_name}"
+    wandb_local_dir.mkdir(parents=True, exist_ok=True)
     data_cfg = config.get("data", {})
     sa_cfg = data_cfg.get("subaperture_config", {}) if isinstance(data_cfg, dict) else {}
     input_indices = sa_cfg.get("input_indices", [])
@@ -81,6 +86,7 @@ def main() -> None:
         ema_beta=ema_cfg.get("beta", 0.9999),
         ema_update_every=ema_cfg.get("update_every", 1),
         ema_update_after_step=ema_cfg.get("update_after_step", 0),
+        data_global_max=config.get("data", {}).get("global_max", 4257.0),
         wandb_save_config_file=wandb_cfg.get("save_config_file", True),
         config_path=args.config,
         wandb_config_artifact_name=wandb_cfg.get("config_artifact_name"),
@@ -97,7 +103,7 @@ def main() -> None:
     wandb_logger = WandbLogger(
         project=wandb_cfg.get("project", "dif_img_rec"),
         name=wandb_cfg.get("name"),
-        save_dir=wandb_cfg.get("save_dir", "logs"),
+        save_dir=str(wandb_local_dir),
         log_model=wandb_cfg.get("log_model", False),
     )
     # Trainer controls loop behavior, device placement, precision, and logging cadence.
