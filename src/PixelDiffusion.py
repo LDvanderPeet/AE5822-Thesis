@@ -82,6 +82,8 @@ class PixelDiffusionConditional(pl.LightningModule):
                  ema_beta=0.9999,
                  ema_update_every=1,
                  ema_update_after_step=0,
+                 phase_hist_max_batches=8,
+                 data_global_max=4257.0,
                  wandb_save_config_file=True,
                  config_path=None,
                  wandb_config_artifact_name=None):
@@ -95,6 +97,15 @@ class PixelDiffusionConditional(pl.LightningModule):
         self.ema_update_every = int(ema_update_every)
         self.ema_update_after_step = int(ema_update_after_step)
         self.ema_step = 0
+        self.data_global_max = float(data_global_max)
+        self._log_norm_scale = float(np.log1p(max(self.data_global_max, 1e-8)))
+        self._val_hist_real_samples = []
+        self._val_hist_imag_samples = []
+        self._val_hist_mag_samples = []
+        self._val_hist_max_samples = 200_000
+        self._val_hist_samples_per_batch = 8_192,
+        self._val_phase_err_samples = []
+        self._phase_hist_max_batches = int(phase_hist_max_batches)
         self.wandb_save_config_file = bool(wandb_save_config_file)
         self.config_path = config_path
         self.wandb_config_artifact_name = wandb_config_artifact_name
@@ -211,11 +222,18 @@ class PixelDiffusionConditional(pl.LightningModule):
         """
         input,output=batch
         loss = self.model.p_loss(self.input_T(output),self.input_T(input))
+        self._accumulate_val_histogram_samples(output)
         
         self.log('val_loss',loss,on_step=False,on_epoch=True,prog_bar=True,logger=True)
 
-        if batch_idx == 0:
+        pred_batch = None
+        should_predict_for_phase_hist = batch_idx < self._phase_hist_max_batches
+        if batch_idx == 0 or should_predict_for_phase_hist:
             pred_batch = self.predict_step(batch, batch_idx)
+            self._accumulate_phase_error_samples(pred_batch, output)
+
+        if batch_idx == 0:
+            self._accumulate_val_histogram_samples(pred_batch)
             psnr, ssim, l1, phase_coh, phase_err = self._compute_reconstruction_metrics(pred_batch, output)
             self.log('val_recon_psnr', psnr, on_step=False, on_epoch=True, prog_bar=True, logger=True)
             self.log('val_recon_ssim', ssim, on_step=False, on_epoch=True, prog_bar=True, logger=True)
@@ -233,10 +251,17 @@ class PixelDiffusionConditional(pl.LightningModule):
                 self.log('val_recon_phase_error_ema', ema_phase_err, on_step=False, on_epoch=True, prog_bar=True,
                          logger=True)
             self._log_val_reconstruction(input, pred_batch, output, ema_pred_batch=ema_pred_batch)
-            self._log_val_target_histograms(output)
             self._log_val_magnitude_kde_db(pred_batch, output)
 
         return loss
+
+    def on_validation_epoch_start(self) -> None:
+        self._val_hist_real_samples = []
+        self._val_hist_imag_samples = []
+        self._val_hist_mag_samples = []
+
+    def on_validation_epoch_end(self) -> None:
+        self._log_val_reconstruction_histograms()
 
     def predict_step(self, batch, batch_idx, dataloader_idx=0):
         """Lightning predict hook that runs the full denoising chain.
@@ -435,31 +460,118 @@ class PixelDiffusionConditional(pl.LightningModule):
         )
         plt.close(fig)
 
-    def _log_val_target_histograms(self, target_batch: torch.Tensor):
-        """Log real/imag/magnitude histograms for the first validation target image."""
-        if self.logger is None or self.trainer is None or not self.trainer.is_global_zero:
+    def _accumulate_val_histogram_samples(self, reconstruction_batch: torch.Tensor):
+        """Collect subsampled histogram values from reconstruction on physical I/Q scale."""
+        reconstruction_batch = reconstruction_batch.detach().float()
+        reconstruction_physical = self._inverse_signed_log_normalize(reconstruction_batch)
+        recon_complex = self._to_complex_channels(reconstruction_physical)
+
+        real_vals = recon_complex.real.flatten().cpu().numpy()
+        imag_vals = recon_complex.imag.flatten().cpu().numpy()
+        mag_vals = torch.abs(recon_complex).flatten().cpu().numpy()
+
+        def _subsample(values: np.ndarray) -> np.ndarray:
+            if values.size <= self._val_hist_samples_per_batch:
+                return values
+            idx = np.linspace(0, values.size - 1, self._val_hist_samples_per_batch, dtype=int)
+            return values[idx]
+
+        self._val_hist_real_samples.append(_subsample(real_vals))
+        self._val_hist_imag_samples.append(_subsample(imag_vals))
+        self._val_hist_mag_samples.append(_subsample(mag_vals))
+
+    def _log_val_reconstruction_histograms(self):
+        """Log end-of-epoch real/imag/magnitude histogram figure for reconstruction."""
+        if (
+            self.logger is None
+            or self.trainer is None
+            or not self.trainer.is_global_zero
+            or len(self._val_hist_real_samples) == 0
+        ):
             return
 
         try:
+            import matplotlib.pyplot as plt
             import wandb
         except ImportError:
             return
 
-        target_complex = self._to_complex_channels(target_batch.detach().float())
-        sample = target_complex[0]
+        real_vals = np.concatenate(self._val_hist_real_samples)
+        imag_vals = np.concatenate(self._val_hist_imag_samples)
+        mag_vals = np.concatenate(self._val_hist_mag_samples)
 
-        real_vals = sample.real.flatten().cpu().numpy()
-        imag_vals = sample.imag.flatten().cpu().numpy()
-        mag_vals = torch.abs(sample).flatten().cpu().numpy()
+        if real_vals.size > self._val_hist_max_samples:
+            idx = np.linspace(0, real_vals.size - 1, self._val_hist_max_samples, dtype=int)
+            real_vals = real_vals[idx]
+        if imag_vals.size > self._val_hist_max_samples:
+            idx = np.linspace(0, imag_vals.size - 1, self._val_hist_max_samples, dtype=int)
+            imag_vals = imag_vals[idx]
+        if mag_vals.size > self._val_hist_max_samples:
+            idx = np.linspace(0, mag_vals.size - 1, self._val_hist_max_samples, dtype=int)
+            mag_vals = mag_vals[idx]
+
+        bins = 120
+        fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+        axes[0].hist(real_vals, bins=bins, color="steelblue", alpha=0.85)
+        axes[0].set_title("Real (I)")
+        axes[1].hist(imag_vals, bins=bins, color="darkorange", alpha=0.85)
+        axes[1].set_title("Imag (Q)")
+        axes[2].hist(mag_vals, bins=bins, color="seagreen", alpha=0.85)
+        axes[2].set_title("Magnitude")
+        for ax in axes:
+            ax.grid(alpha=0.25, linestyle="--")
+        fig.suptitle("Validation Reconstruction Histogram (Physical Scale)")
+        fig.tight_layout()
 
         self.logger.experiment.log(
             {
-                "val/hist_real": wandb.Histogram(real_vals),
-                "val/hist_imag": wandb.Histogram(imag_vals),
-                "val/hist_magnitude": wandb.Histogram(mag_vals),
+                "val/reconstruction_histograms": wandb.Image(fig),
             },
             step=self.global_step,
         )
+        plt.close(fig)
+
+    def _accumulate_phase_error_samples(self, pred_batch: torch.Tensor, target_batch: torch.Tensor):
+        pred_physical = self._inverse_signed_log_normalize(pred_batch.detach().float())
+        target_physical = self._inverse_signed_log_normalize(target_batch.detach().float())
+        pred_cplx = self._to_complex_channels(pred_physical)
+        target_cplx = self._to_complex_channels(target_physical)
+
+        phase_err = torch.abs(torch.angle(pred_cplx * torch.conj(target_cplx))).flatten().cpu().numpy()
+        if phase_err.size > self._val_hist_samples_per_batch:
+            idx = np.linspace(0, phase_err.size - 1, self._val_hist_samples_per_batch, dtype=int)
+            phase_err = phase_err[idx]
+        self._val_phase_err_samples.append(phase_err)
+
+    def _log_val_phase_error_histogram(self):
+        if (
+            self.logger is None
+            or self.trainer is None
+            or not self.trainer.is_global_zero
+            or len(self._val_phase_err_samples) == 0
+        ):
+            return
+
+        try:
+            import matplotlib.pyplot as plt
+            import wandb
+        except ImportError:
+            return
+
+        phase_vals = np.concatenate(self._val_phase_err_samples)
+        if phase_vals.size > self._val_hist_max_samples:
+            idx = np.linspace(0, phase_vals.size - 1, self._val_hist_max_samples, dtype=int)
+            phase_vals = phase_vals[idx]
+
+        fig, ax = plt.subplots(1, 1, figsize=(6, 4))
+        ax.hist(phase_vals, bins=120, color="mediumpurple", alpha=0.9)
+        ax.set_title("Validation Phase Error Histogram")
+        ax.set_xlabel("|Wrapped phase error| [rad]")
+        ax.set_ylabel("Count")
+        ax.grid(alpha=0.25, linestyle="--")
+        fig.tight_layout()
+        self.logger.experiment.log({"val/phase_error_histogram": wandb.Image(fig)}, step=self.global_step)
+        plt.close(fig)
 
     def _log_val_magnitude_kde_db(self, pred_batch: torch.Tensor, target_batch: torch.Tensor):
         """Log KDE overlay of reconstruction vs reference magnitudes in dB for one validation image."""
@@ -476,8 +588,10 @@ class PixelDiffusionConditional(pl.LightningModule):
         eps = 1e-8
         max_samples = 200_000
 
-        pred_cplx = self._to_complex_channels(pred_batch.detach().float())[0]
-        target_cplx = self._to_complex_channels(target_batch.detach().float())[0]
+        pred_physical = self._inverse_signed_log_normalize(pred_batch.detach().float())
+        target_physical = self._inverse_signed_log_normalize(target_batch.detach().float())
+        pred_cplx = self._to_complex_channels(pred_physical)[0]
+        target_cplx = self._to_complex_channels(target_physical)[0]
 
         pred_db = (20.0 * torch.log10(torch.clamp(torch.abs(pred_cplx), min=eps))).flatten().cpu().numpy()
         target_db = (20.0 * torch.log10(torch.clamp(torch.abs(target_cplx), min=eps))).flatten().cpu().numpy()
@@ -516,6 +630,10 @@ class PixelDiffusionConditional(pl.LightningModule):
             step=self.global_step,
         )
         plt.close(fig)
+
+    def _inverse_signed_log_normalize(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Undo signed log normalization back to physical I/Q scale."""
+        return torch.sign(tensor) * torch.expm1(torch.abs(tensor) * self._log_norm_scale)
 
     def _build_input_panels(self, input_tensor: torch.Tensor):
         """Split condition channels into per-input images and attach human-readable labels."""
