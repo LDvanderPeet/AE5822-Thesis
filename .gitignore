@@ -3,6 +3,9 @@ dataset/
 dataset_patches_128/
 logs/
 archive/
+checkpoints/
+evaluation_results/
+evaluation_results_kde/
 *.pth
 *.zarr
 *.npy
