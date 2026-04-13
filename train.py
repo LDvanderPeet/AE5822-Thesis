@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime
 from pathlib import Path
+import re
 
 import pytorch_lightning as pl
 import torch
@@ -54,9 +55,12 @@ def main() -> None:
     unet_cfg = model_cfg.get("unet", {})
     ema_cfg = model_cfg.get("ema", {})
     wandb_cfg = config.get("logging", {}).get("wandb", {})
-    run_name = wandb_cfg.get("name", "run")
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    wandb_local_dir = Path(wandb_cfg.get("save_dir", "logs")).expanduser / f"{timestamp}-{run_name}"
+    raw_run_name = wandb_cfg.get("name") or "run"
+    run_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", raw_run_name).strip("._-") or "run"
+    timestamp = datetime.now().strftime("%Y%d%m-%H%M")
+    run_folder_name = f"{timestamp}-{run_name}"
+    wandb_base_dir = Path(wandb_cfg.get("save_dir", "logs")).expanduser()
+    wandb_local_dir = wandb_base_dir / run_folder_name
     wandb_local_dir.mkdir(parents=True, exist_ok=True)
     data_cfg = config.get("data", {})
     sa_cfg = data_cfg.get("subaperture_config", {}) if isinstance(data_cfg, dict) else {}
@@ -86,6 +90,7 @@ def main() -> None:
         ema_beta=ema_cfg.get("beta", 0.9999),
         ema_update_every=ema_cfg.get("update_every", 1),
         ema_update_after_step=ema_cfg.get("update_after_step", 0),
+        phase_hist_max_batches=model_cfg.get("phase_hist_max_batches", 8),
         data_global_max=config.get("data", {}).get("global_max", 4257.0),
         wandb_save_config_file=wandb_cfg.get("save_config_file", True),
         config_path=args.config,
@@ -109,8 +114,11 @@ def main() -> None:
     # Trainer controls loop behavior, device placement, precision, and logging cadence.
     lr_monitor = LearningRateMonitor(logging_interval="step")
     checkpoint_cfg = trainer_cfg.get("checkpointing", {})
+    checkpoint_base_dir = Path(checkpoint_cfg.get("dirpath", "checkpoints")).expanduser()
+    checkpoint_dir = checkpoint_base_dir / run_folder_name
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_callback = ModelCheckpoint(
-        dirpath=checkpoint_cfg.get("dirpath", "checkpoints"),
+        dirpath=str(checkpoint_dir),
         filename=checkpoint_cfg.get("filename", "{epoch:03d}-{val_loss:.4f}"),
         monitor=checkpoint_cfg.get("monitor", "val_loss"),
         mode=checkpoint_cfg.get("mode", "min"),
