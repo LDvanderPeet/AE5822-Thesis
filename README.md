@@ -52,8 +52,9 @@ return x, y
 with shape `[B, C, H, W]` for both tensors.
 
 In the current SAR pipeline:
-- channels are built from interleaved magnitude/phase components,
-- values are normalised/clamped into `[-1, 1]` inside the dataset backend,
+- channels are built from interleaved Real (I) and Imaginary (Q) components,
+- values are normalised using a signed `log1p` transformation scaled by a configurable `global_max` to handle heavy-tailed SAR distributions, 
+- the dataset backend clamps these normalised values into the `[-1, 1]` latent space, 
 - model `input_T` / `output_T` currently map to `[-1, 1]` (no additional remapping).
 
 ---
@@ -174,11 +175,14 @@ python3 evaluate.py \
   --split test
 ```
 
-Reported metrics:
+### Reported metrics:
+This script performs an offline radar physics evaluation. The metrics explicitly evaluate structure and phase coherence.
+Spatial metrics:
 - `psf_azimuth_rel_err`: relative 3 dB width error in azimuth.
 - `psf_range_rel_err`: relative 3 dB width error in range.
 - `enl_rel_err`: relative ENL error on intensity.
 - `kde_js_disntance`: Jensen-Shannon distance between KDEs of reconstructed vs target intensity.
+Phase metrics:
 - `rel_phase_mae_rad`: mean absolute wrapped error of relative phase (radians).
 - `rel_phase_coherence`: circular coherence of relative phase errors (1.0 is best).
 
