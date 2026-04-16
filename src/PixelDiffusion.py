@@ -33,11 +33,15 @@ def _build_hybrid_diffusion_loss(num_timesteps, base_loss='mse', ms_ssim_t_limit
 
         noise_01 = (noise + 1.0) * 0.5
         noise_hat_01 = (noise_hat + 1.0) * 0.5
+
+        custom_betas = (0.0517, 0.3295, 0.3462, 0.2726)
+
         ms_ssim_per_sample = multiscale_structural_similarity_index_measure(
             noise_hat_01,
             noise_01,
             data_range=1.0,
-            reduction='none'
+            reduction='none',
+            betas=custom_betas
         )
         ms_ssim_loss_per_sample = 1.0 - ms_ssim_per_sample
 
@@ -103,7 +107,7 @@ class PixelDiffusionConditional(pl.LightningModule):
         self._val_hist_imag_samples = []
         self._val_hist_mag_samples = []
         self._val_hist_max_samples = 200_000
-        self._val_hist_samples_per_batch = 8_192,
+        self._val_hist_samples_per_batch = 8_192
         self._val_phase_err_samples = []
         self._phase_hist_max_batches = int(phase_hist_max_batches)
         self.wandb_save_config_file = bool(wandb_save_config_file)
@@ -222,18 +226,20 @@ class PixelDiffusionConditional(pl.LightningModule):
         """
         input,output=batch
         loss = self.model.p_loss(self.input_T(output),self.input_T(input))
-        self._accumulate_val_histogram_samples(output)
+        # self._accumulate_val_histogram_samples(output)
         
         self.log('val_loss',loss,on_step=False,on_epoch=True,prog_bar=True,logger=True)
 
         pred_batch = None
         should_predict_for_phase_hist = batch_idx < self._phase_hist_max_batches
+
         if batch_idx == 0 or should_predict_for_phase_hist:
             pred_batch = self.predict_step(batch, batch_idx)
             self._accumulate_phase_error_samples(pred_batch, output)
+            self._accumulate_val_histogram_samples(pred_batch)
 
         if batch_idx == 0:
-            self._accumulate_val_histogram_samples(pred_batch)
+            # self._accumulate_val_histogram_samples(pred_batch)
             psnr, ssim, l1, phase_coh, phase_err = self._compute_reconstruction_metrics(pred_batch, output)
             self.log('val_recon_psnr', psnr, on_step=False, on_epoch=True, prog_bar=True, logger=True)
             self.log('val_recon_ssim', ssim, on_step=False, on_epoch=True, prog_bar=True, logger=True)
@@ -259,9 +265,11 @@ class PixelDiffusionConditional(pl.LightningModule):
         self._val_hist_real_samples = []
         self._val_hist_imag_samples = []
         self._val_hist_mag_samples = []
+        self._val_phase_err_samples = []
 
     def on_validation_epoch_end(self) -> None:
         self._log_val_reconstruction_histograms()
+        self._log_val_phase_error_histogram()
 
     def predict_step(self, batch, batch_idx, dataloader_idx=0):
         """Lightning predict hook that runs the full denoising chain.

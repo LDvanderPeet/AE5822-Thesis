@@ -4,9 +4,9 @@ data:
   root_dir: "/shared/home/lvanderpeet/AE5822-Thesis/dataset_patches_128"
   image_height: 128
   image_width: 128
-  global_max: 2.5
+  global_max: 300
   subaperture_config:
-   input_indices: [1, 2, 3]
+   input_indices: [1, 3]
    output_indices: [0]
    active_polarizations: ["VV"] # retrieves only these polarizations ("vv", "vh", "hv", "hh")
   loader:
@@ -19,11 +19,11 @@ data:
     test: 0.1
 
 model:
-  in_channels: 6  # Channels in the conditional input x.
+  in_channels: 4  # Channels in the conditional input x.
   out_channels: 2  # Channels in the reconstruction target y.
   num_timesteps: 1000  # Number of diffusion denoising steps.
   schedule: cosine  # Beta schedule variant for the forward process.
-  loss_fn: mae # 'mse' (L2), 'mae' (L1), or 'hybrid' (MS-SSIM for low t and L1/L2 otherwise).
+  loss_fn: hybrid # 'mse' (L2), 'mae' (L1), or 'hybrid' (MS-SSIM for low t and L1/L2 otherwise).
   hybrid_base_loss: mse # Only used when loss_fn='hybrid': choose fallback loss at high t ('mse' or 'mae').
   hybrid_ms_ssim_t_limit: 10 # Only used when loss_fn='hybrid': apply MS-SSIM for timesteps t <= this limit.
   noise_offset: 0.0 # optional low-frequency offset term to training noise
@@ -35,7 +35,7 @@ model:
   unet:
     dim: 48  # Base UNet width. Previous setting was 64; 48 reduces parameter count to about half (30M instead of 55M).
     dim_mults: [1, 2, 4, 8]  # Width multipliers per UNet level.
-    channels: 8  # Input channels to UNet; for conditional concat this is usually in_channels + out_channels.
+    channels: 6  # Input channels to UNet; for conditional concat this is usually in_channels + out_channels.
     out_dim: 2  # UNet output channels; should match model.out_channels.
 
 optimization:
@@ -67,7 +67,7 @@ trainer:
 logging:
   wandb:
     project: dif_img_rec  # Weights & Biases project name.
-    name: capability_testing  # Optional run name; null lets W&B auto-generate one.
+    name: hybrid_loss  # Optional run name; null lets W&B auto-generate one.
     save_dir: logs  # Local directory used by W&B for run files.
     log_model: false  # Whether to upload model artifacts automatically.
     save_config_file: true # Upload the active YAML config file to W&B files/artifacts.
