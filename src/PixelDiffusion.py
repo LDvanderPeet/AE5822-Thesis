@@ -16,7 +16,7 @@ from .EMA import EMAWrapper
 def _build_hybrid_diffusion_loss(num_timesteps, base_loss='mse', ms_ssim_t_limit=10):
     """Create timestep-aware hybrid loss for diffusion training.
 
-    For early timesteps (t <= ms_ssim_t_limit), optimize 1 - MS-SSIM.
+    For early timesteps (t <= ms_ssim_t_limit), optimize 1 - MS-SSIM + Circular Phase loss.
     For later timesteps, optimize the configured base loss (L1/L2)."""
     del num_timesteps
 
@@ -45,8 +45,21 @@ def _build_hybrid_diffusion_loss(num_timesteps, base_loss='mse', ms_ssim_t_limit
         )
         ms_ssim_loss_per_sample = 1.0 - ms_ssim_per_sample
 
-        use_ms_ssim = (t <= ms_ssim_t_limit)
-        hybrid_per_sample = torch.where(use_ms_ssim, ms_ssim_loss_per_sample, base_per_sample)
+        pred_cplx = PixelDiffusionConditional._to_complex_channels(noise_hat)
+        target_cplx = PixelDiffusionConditional._to_complex_channels(noise)
+
+        pred_phase = torch.angle(pred_cplx)
+        target_phase = torch.angle(target_cplx)
+
+        phase_diff = torch.abs(pred_phase - target_phase)
+        circular_phase_diff = torch.min(phase_diff, 2 * torch.pi - phase_diff)
+        target_mag = torch.abs(target_cplx)
+        phase_loss_per_sample = (circular_phase_diff * target_mag).flatten(1).mean(dim=1)
+        phase_weight = 0.5
+        advanced_loss_per_sample = ms_ssim_loss_per_sample + (phase_weight * phase_loss_per_sample)
+
+        use_advanced = (t <= ms_ssim_t_limit)
+        hybrid_per_sample = torch.where(use_advanced, advanced_loss_per_sample, base_per_sample)
         return hybrid_per_sample.mean()
 
     return _hybrid_diffusion_loss
