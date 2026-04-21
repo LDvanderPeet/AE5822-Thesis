@@ -24,7 +24,7 @@ model:
   num_timesteps: 1000  # Number of diffusion denoising steps.
   schedule: cosine  # Beta schedule variant for the forward process.
   loss_fn: hybrid # 'mse' (L2), 'mae' (L1), or 'hybrid' (MS-SSIM for low t and L1/L2 otherwise).
-  hybrid_base_loss: mse # Only used when loss_fn='hybrid': choose fallback loss at high t ('mse' or 'mae').
+  hybrid_base_loss: mae # Only used when loss_fn='hybrid': choose fallback loss at high t ('mse' or 'mae').
   hybrid_ms_ssim_t_limit: 10 # Only used when loss_fn='hybrid': apply MS-SSIM for timesteps t <= this limit.
   noise_offset: 0.0 # optional low-frequency offset term to training noise
   ema:
@@ -67,7 +67,7 @@ trainer:
 logging:
   wandb:
     project: dif_img_rec  # Weights & Biases project name.
-    name: phase_loss  # Optional run name; null lets W&B auto-generate one.
+    name: hybrid_phase_loss_mae  # Optional run name; null lets W&B auto-generate one.
     save_dir: logs  # Local directory used by W&B for run files.
     log_model: false  # Whether to upload model artifacts automatically.
     save_config_file: true # Upload the active YAML config file to W&B files/artifacts.
@@ -81,3 +81,4 @@ evaluation:
     point_target_analysis: False
     kde_distance: True
     phase_coherence: True
+    enl_comparison: True

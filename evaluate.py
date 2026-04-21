@@ -324,6 +324,17 @@ def local_interferometric_coherence(
     return coh.squeeze(0).squeeze(0)
 
 
+def equivalent_number_of_looks(cplx: torch.Tensor) -> float:
+    """Estimate ENL from intensity (|S|^2) using mean^2 / variance."""
+    intensity = torch.abs(cplx) ** 2
+    intensity = torch.to(torch.float64).flatten()
+
+    mean_i = torch.mean(intensity)
+    var_i = torch.var(intensity, unbiased=False)
+    enl = (mean_i ** 2) / torch.clamp(var_i, min=EPS)
+    return float(enl.item())
+
+
 def evaluate(config: dict[str, Any]) -> dict[str, Any]:
     eval_cfg = config.get("evaluation", {})
     tests = eval_cfg.get("tests", {})
@@ -347,6 +358,7 @@ def evaluate(config: dict[str, Any]) -> dict[str, Any]:
     run_point_target = bool(tests.get("point_target_analysis", False))
     run_kde = bool(tests.get("kde_distance", False))
     run_phase = bool(tests.get("phase_coherence", False))
+    run_enl = bool(tests.get("enl_comparison", False))
 
     irf_results: list[dict[str, Any]] = []
     max_kde_samples = int(eval_cfg.get("max_kde_samples", 400_000))
@@ -355,6 +367,12 @@ def evaluate(config: dict[str, Any]) -> dict[str, Any]:
         "mean_abs_phase_diff": [],
         "coherence_mean": [],
         "coherence_std": [],
+    }
+    enl_stats = {
+        "gt_enl": [],
+        "pred_enl": [],
+        "relative_error": [],
+        "absolute_error": [],
     }
 
     with torch.no_grad():
@@ -395,6 +413,20 @@ def evaluate(config: dict[str, Any]) -> dict[str, Any]:
                     phase_stats["coherence_mean"].append(float(torch.mean(coh).item()))
                     phase_stats["coherence_std"].append(float(torch.std(coh).item()))
 
+                if run_enl:
+                    gt_cplx = to_complex_channels(y_i)
+                    pred_cplx = to_complex_channels(pred_i)
+
+                    gt_enl = equivalent_number_of_looks(gt_cplx)
+                    pred_enl = equivalent_number_of_looks(pred_cplx)
+                    abs_err = abs(pred_enl - gt_enl)
+                    rel_err = abs_err / max(abs(gt_enl), EPS)
+
+                    enl_stats["gt_enl"].append(gt_enl)
+                    enl_stats["pred_enl"].append(pred_enl)
+                    enl_stats["absolute_error"].append(abs_err)
+                    enl_stats["relative_error"].append(rel_err)
+
             if run_kde and sum(arr.size for arr in gt_logmag) > max_kde_samples:
                 break
 
@@ -429,6 +461,42 @@ def evaluate(config: dict[str, Any]) -> dict[str, Any]:
                 "std": float(np.std(v)) if v else None,
             }
             for k, v in phase_stats.items()
+        }
+
+    if run_enl:
+        results["enl_comparison"] = {
+            "num_samples": len(enl_stats["gt_enl"]),
+            "gt_enl": {
+                "mean": float(np.mean(enl_stats["gt_enl"])) if enl_stats["gt_enl"] else None,
+                "std": float(np.std(enl_stats["gt_enl"])) if enl_stats["gt_enl"] else None,
+            },
+            "pred_enl": {
+                "mean": float(np.mean(enl_stats["pred_enl"])) if enl_stats["pred_enl"] else None,
+                "std": float(np.std(enl_stats["pred_enl"])) if enl_stats["pred_enl"] else None,
+            },
+            "absolute_error": {
+                "mean": float(np.mean(enl_stats["absolute_error"])) if enl_stats["absolute_error"] else None,
+                "std": float(np.std(enl_stats["absolute_error"])) if enl_stats["absolute_error"] else None,
+            },
+            "relative_error": {
+                "mean": float(np.mean(enl_stats["relative_error"])) if enl_stats["relative_error"] else None,
+                "std": float(np.std(enl_stats["relative_error"])) if enl_stats["relative_error"] else None,
+            },
+            "samples": [
+                {
+                    "gt_enl": gt,
+                    "pred_enl": pred,
+                    "absolute_error": abs_err,
+                    "relative_error": rel_err,
+                }
+                for gt, pred, abs_err, rel_err in zip(
+                    enl_stats["gt_enl"],
+                    enl_stats["pred_enl"],
+                    enl_stats["absolute_error"],
+                    enl_stats["relative_error"],
+                    strict=False,
+                )
+            ],
         }
 
     with (save_dir / "metrics.json").open("w", encoding="utf-8") as f:
