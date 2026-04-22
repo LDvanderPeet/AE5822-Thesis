@@ -25,7 +25,8 @@ model:
   schedule: cosine  # Beta schedule variant for the forward process.
   loss_fn: hybrid # 'mse' (L2), 'mae' (L1), or 'hybrid' (MS-SSIM for low t and L1/L2 otherwise).
   hybrid_base_loss: mae # Only used when loss_fn='hybrid': choose fallback loss at high t ('mse' or 'mae').
-  hybrid_ms_ssim_t_limit: 10 # Only used when loss_fn='hybrid': apply MS-SSIM for timesteps t <= this limit.
+  hybdrid_phase_weight: 0.5 # Only used when loss_fn='hybrid': scales the circular phase term inside the advanced loss.
+  hybrid_ms_ssim_t_limit: 50 # Only used when loss_fn='hybrid': apply MS-SSIM for timesteps t <= this limit.
   noise_offset: 0.0 # optional low-frequency offset term to training noise
   ema:
     enabled: false  # Keep an exponential moving average copy of training weights.
@@ -67,7 +68,7 @@ trainer:
 logging:
   wandb:
     project: dif_img_rec  # Weights & Biases project name.
-    name: hybrid_phase_loss_mae  # Optional run name; null lets W&B auto-generate one.
+    name: mae_loss  # Optional run name; null lets W&B auto-generate one.
     save_dir: logs  # Local directory used by W&B for run files.
     log_model: false  # Whether to upload model artifacts automatically.
     save_config_file: true # Upload the active YAML config file to W&B files/artifacts.

@@ -192,7 +192,7 @@ class DenoisingDiffusionConditionalProcess(nn.Module):
             
         return x_t
         
-    def p_loss(self,output,condition):
+    def p_loss(self,output,condition,return_details=False):
         """
             Assumes output and input are in [-1,+1] range
         """        
@@ -211,7 +211,16 @@ class DenoisingDiffusionConditionalProcess(nn.Module):
         noise_hat = self.model(model_input, t) 
             
         # apply loss
-        return self.loss_fn(noise, noise_hat, t)
+        loss = self.loss_fn(noise, noise_hat, t)
+
+        if isinstance(loss, tuple):
+            loss, details = loss
+        else:
+            details = {}
+
+        if not return_details:
+            return loss
+        return loss, details
 
     @staticmethod
     def _mse_loss(noise, noise_hat, t):

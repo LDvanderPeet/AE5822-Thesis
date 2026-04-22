@@ -13,7 +13,12 @@ from .EMA import EMAWrapper
 
 
 
-def _build_hybrid_diffusion_loss(num_timesteps, base_loss='mse', ms_ssim_t_limit=10):
+def _build_hybrid_diffusion_loss(
+        num_timesteps,
+        base_loss='mse',
+        ms_ssim_t_limit=10,
+        phase_weight=0.5,
+):
     """Create timestep-aware hybrid loss for diffusion training.
 
     For early timesteps (t <= ms_ssim_t_limit), optimize 1 - MS-SSIM + Circular Phase loss.
@@ -55,12 +60,21 @@ def _build_hybrid_diffusion_loss(num_timesteps, base_loss='mse', ms_ssim_t_limit
         circular_phase_diff = torch.min(phase_diff, 2 * torch.pi - phase_diff)
         target_mag = torch.abs(target_cplx)
         phase_loss_per_sample = (circular_phase_diff * target_mag).flatten(1).mean(dim=1)
-        phase_weight = 0.5
         advanced_loss_per_sample = ms_ssim_loss_per_sample + (phase_weight * phase_loss_per_sample)
 
         use_advanced = (t <= ms_ssim_t_limit)
         hybrid_per_sample = torch.where(use_advanced, advanced_loss_per_sample, base_per_sample)
-        return hybrid_per_sample.mean()
+        loss = hybrid_per_sample.mean()
+
+        details = {
+            "base_loss_mean": base_per_sample.mean().detach(),
+            "ms_ssim_loss_mean": ms_ssim_loss_per_sample.mean().detach(),
+            "phase_loss_mean": phase_loss_per_sample.mean().detach(),
+            "advanced_loss_mean": advanced_loss_per_sample.mean().detach(),
+            "hybrid_loss_mean": loss.detach(),
+            "advanced_t_fraction": use_advanced.float().mean().detach(),
+        }
+        return loss, details
 
     return _hybrid_diffusion_loss
 
@@ -88,6 +102,7 @@ class PixelDiffusionConditional(pl.LightningModule):
                  loss_fn='mse',
                  hybrid_base_loss='mse',
                  hybrid_ms_ssim_t_limt=10,
+                 hybrid_phase_weight=0.5,
                  model_dim=64,
                  model_dim_mults=(1,2,4,8),
                  model_channels=None,
@@ -136,7 +151,8 @@ class PixelDiffusionConditional(pl.LightningModule):
             resolved_loss_fn = _build_hybrid_diffusion_loss(
                 num_timesteps=num_timesteps,
                 base_loss=hybrid_base_loss,
-                ms_ssim_t_limit=hybrid_ms_ssim_t_limt
+                ms_ssim_t_limit=hybrid_ms_ssim_t_limt,
+                phae_weight=hybrid_phase_weight,
             )
         elif self.loss_name == 'mae':
             resolved_loss_fn = _l1_diffusion_loss
@@ -218,8 +234,12 @@ class PixelDiffusionConditional(pl.LightningModule):
     def training_step(self, batch, batch_idx):   
         """Lightning train hook for conditional diffusion."""
         input,output=batch
-        loss = self.model.p_loss(self.input_T(output),self.input_T(input))
-        
+        if self.loss_name == 'hybrid':
+            loss, loss_details = self.model.p_loss(self.input_T(output), self.input_T(input), return_details=True)
+            self._log_hybrid_loss_terms(loss_details, stage='train')
+        else:
+            loss = self.model.p_loss(self.input_T(output), self.input_T(input))
+
         self.log('train_loss',loss,on_step=True,on_epoch=True,prog_bar=True,logger=True)
         
         return loss
@@ -238,7 +258,11 @@ class PixelDiffusionConditional(pl.LightningModule):
         computes a full denoising reconstruction plus image/metric logging.
         """
         input,output=batch
-        loss = self.model.p_loss(self.input_T(output),self.input_T(input))
+        if self.loss_name == 'hybrid':
+            loss, loss_details = self.model.p_loss(self.input_T(output), self.input_T(input), return_details=True)
+            self._log_hybrid_loss_terms(loss_details, stage='val')
+        else:
+            loss = self.model.p_loss(self.input_T(output), self.input_T(input))
         # self._accumulate_val_histogram_samples(output)
         
         self.log('val_loss',loss,on_step=False,on_epoch=True,prog_bar=True,logger=True)
@@ -317,6 +341,21 @@ class PixelDiffusionConditional(pl.LightningModule):
         return {"optimizer": optimizer,
                 "lr_scheduler": {"scheduler": scheduler,
                                  "monitor": "val_loss"}}
+
+    def _log_hybrid_loss_terms(self, loss_details, stage: str):
+        """Log individual hybrid-loss components for scale diagnostics."""
+        self.log(f'{stage}_hybrid/base_loss', loss_details['base_loss_mean'], on_step=True, on_epoch=True,
+                 prog_bar=False, logger=True)
+        self.log(f'{stage}_hybrid/ms_ssim_loss', loss_details['ms_ssim_loss_mean'], on_step=True, on_epoch=True,
+                 prog_bar=False, logger=True)
+        self.log(f'{stage}_hybrid/phase_loss', loss_details['phase_loss_mean'], on_step=True, on_epoch=True,
+                 prog_bar=False, logger=True)
+        self.log(f'{stage}_hybrid/advanced_loss', loss_details['advanced_loss_mean'], on_step=True, on_epoch=True,
+                 prog_bar=False, logger=True)
+        self.log(f'{stage}_hybrid/loss', loss_details['hybrid_loss_mean'], on_step=True, on_epoch=True, prog_bar=False,
+                 logger=True)
+        self.log(f'{stage}_hybrid/advanced_t_fraction', loss_details['advanced_t_fraction'], on_step=True,
+                 on_epoch=True, prog_bar=False, logger=True)
 
     def _to_plot_image(self, tensor):
         """Convert CHW tensor to a matplotlib-friendly image array."""

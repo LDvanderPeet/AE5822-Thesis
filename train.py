@@ -79,6 +79,7 @@ def main() -> None:
         loss_fn=model_cfg.get("loss_fn", 'mse'),
         hybrid_base_loss=model_cfg.get("hybrid_base_loss", "mse"),
         hybrid_ms_ssim_t_limt=model_cfg.get("hybrid_ms_ssim_t_limit", 10),
+        hybrid_phase_weight=model_cfg.get("hybrid_phase_weight", 0.5),
         model_dim=unet_cfg.get("dim", 64),
         model_dim_mults=tuple(unet_cfg.get("dim_mults", [1, 2, 4, 8])),
         model_channels=unet_cfg.get("channels"),
