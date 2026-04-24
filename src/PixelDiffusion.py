@@ -152,7 +152,7 @@ class PixelDiffusionConditional(pl.LightningModule):
                 num_timesteps=num_timesteps,
                 base_loss=hybrid_base_loss,
                 ms_ssim_t_limit=hybrid_ms_ssim_t_limt,
-                phae_weight=hybrid_phase_weight,
+                phase_weight=hybrid_phase_weight,
             )
         elif self.loss_name == 'mae':
             resolved_loss_fn = _l1_diffusion_loss
