@@ -4,7 +4,7 @@ import inspect
 from typing import Optional
 
 import pytorch_lightning as pl
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset, Subset
 
 from .dataset import PairedImageDataset
 
@@ -25,9 +25,9 @@ class PairedDataModule(pl.LightningDataModule):
         self.num_workers = num_workers
         self.pin_memory = pin_memory
 
-        self.train_dataset: Optional[PairedImageDataset] = None
-        self.val_dataset: Optional[PairedImageDataset] = None
-        self.test_dataset: Optional[PairedImageDataset] = None
+        self.train_dataset: Optional[Dataset] = None
+        self.val_dataset: Optional[Dataset] = None
+        self.test_dataset: Optional[Dataset] = None
 
     @classmethod
     def from_config(cls, config: dict) -> "PairedDataModule":
@@ -54,11 +54,36 @@ class PairedDataModule(pl.LightningDataModule):
 
     def setup(self, stage: Optional[str] = None) -> None:
         if stage in (None, "fit"):
-            self.train_dataset = PairedImageDataset(config=self.config, split="train", da=True)
-            self.val_dataset = PairedImageDataset(config=self.config, split="valid", da=False)
+            data_cfg = self.config.get("data", {})
+            overfit_cfg = data_cfg.get("overfit", {})
+            overfit_enabled = bool(overfit_cfg.get("enabled", False))
+
+            if overfit_enabled:
+                source_split = overfit_cfg.get("source_split", "train")
+                num_patches = int(overfit_cfg.get("num_patches", 8))
+
+                base_dataset = PairedImageDataset(config=self.config, split=source_split, da=False)
+                n_available = len(base_dataset)
+                n_selected = min(num_patches, n_available)
+
+                if n_selected <= 0:
+                    raise ValueError(
+                        "Overfit mode requested but no samples were found in the selected source split."
+                    )
+
+                shared_subset = Subset(base_dataset, list(range(n_selected)))
+                self.train_dataset = shared_subset
+                self.val_dataset = shared_subset
+                print(
+                    f"--- OVERFIT MODE ENABLED --- "
+                    f"Using the same {n_selected} '{source_split}' patches for both train and valid."
+                )
+            else:
+                self.train_dataset = PairedImageDataset(config=self.config, split="train", da=True)
+                self.val_dataset = PairedImageDataset(config=self.config, split="valid", da=False)
 
         if stage in (None, "test"):
-            self.test_dataset = PairedImageDataset(config=self.config, split="test", da=False)
+                self.test_dataset = PairedImageDataset(config=self.config, split="test", da=False)
 
     def train_dataloader(self) -> DataLoader:
         if self.train_dataset is None:

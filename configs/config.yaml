@@ -10,13 +10,17 @@ data:
    output_indices: [0]
    active_polarizations: ["VV"] # retrieves only these polarizations ("vv", "vh", "hv", "hh")
   loader:
-    batch_size: 4  # Number of samples per optimization step.
-    num_workers: 8  # Number of worker processes used by PyTorch DataLoader.
+    batch_size: 16  # Number of samples per optimization step.
+    num_workers: 16  # Number of worker processes used by PyTorch DataLoader.
     pin_memory: false  # Pin CPU memory for faster transfer to GPU (usually true when training on CUDA).
   split:
     train: 0.7
     valid: 0.2
     test: 0.1
+  overfit:
+    enabled: true # Debug/sanity-check mode: reuse the exact same patches for train and valid.
+    source_split: train # Which split to draw the repeated subset from.
+    num_patches: 960 # Number of unique patches shared by both train and valid loaders.
 
 model:
   in_channels: 4  # Channels in the conditional input x.
@@ -68,7 +72,7 @@ trainer:
 logging:
   wandb:
     project: dif_img_rec  # Weights & Biases project name.
-    name: mae_loss  # Optional run name; null lets W&B auto-generate one.
+    name: overfit_test  # Optional run name; null lets W&B auto-generate one.
     save_dir: logs  # Local directory used by W&B for run files.
     log_model: false  # Whether to upload model artifacts automatically.
     save_config_file: true # Upload the active YAML config file to W&B files/artifacts.

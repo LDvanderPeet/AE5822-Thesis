@@ -234,6 +234,40 @@ Set env var before run:
 ```bash
 export WANDB_DISABLED=true
 ```
+
+---
+
+## Overfit sanity check (same patches in train and validation)
+
+Your PhD colleague's suggestion is a strong diagnostic: intentionally forcing train and validation to use the same tiny patch set helps verify that the model and preprocessing can represent the phase reconstruction task at all.
+
+If this controlled run cannot overfit, the bottleneck is usually implementation/configuration (loss scaling, channel mapping, normalization, model capacity, optimizer setup), not generalization.
+
+### How to enable in this repository
+
+Set the following in `configs/config.yaml`:
+
+```yaml
+data:
+  overfit:
+    enabled: true
+    source_split: train
+    num_patches: 8
+```
+
+Behavior:
+- `data/datamodule.py` will create one subset from `source_split` and use that exact subset for both `train_dataloader()` and `val_dataloader()`.
+- Data augmentation is disabled in this mode by design to make memorization diagnostics easier to interpret.
+
+### What to expect
+
+- `train_loss` should drop quickly.
+- Validation reconstruction metrics (PSNR/SSIM/phase-coherence) should also improve strongly because validation sees the same samples.
+- If phase metrics remain poor even in this setup, inspect:
+  - I/Q channel ordering and selected subaperture indices,
+  - normalization/inverse-normalization consistency,
+  - phase-aware loss weighting (`model.loss_fn`, `hybrid_phase_weight`),
+  - diffusion step count and UNet width.
 ---
 
 ## Practical Checklist Before Long Training Runs

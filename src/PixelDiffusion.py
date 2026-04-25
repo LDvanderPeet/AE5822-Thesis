@@ -344,17 +344,18 @@ class PixelDiffusionConditional(pl.LightningModule):
 
     def _log_hybrid_loss_terms(self, loss_details, stage: str):
         """Log individual hybrid-loss components for scale diagnostics."""
-        self.log(f'{stage}_hybrid/base_loss', loss_details['base_loss_mean'], on_step=True, on_epoch=True,
+        log_on_step = stage == "train"
+        self.log(f'{stage}_hybrid/base_loss', loss_details['base_loss_mean'], on_step=log_on_step, on_epoch=True,
                  prog_bar=False, logger=True)
-        self.log(f'{stage}_hybrid/ms_ssim_loss', loss_details['ms_ssim_loss_mean'], on_step=True, on_epoch=True,
+        self.log(f'{stage}_hybrid/ms_ssim_loss', loss_details['ms_ssim_loss_mean'], on_step=log_on_step, on_epoch=True,
                  prog_bar=False, logger=True)
-        self.log(f'{stage}_hybrid/phase_loss', loss_details['phase_loss_mean'], on_step=True, on_epoch=True,
+        self.log(f'{stage}_hybrid/phase_loss', loss_details['phase_loss_mean'], on_step=log_on_step, on_epoch=True,
                  prog_bar=False, logger=True)
-        self.log(f'{stage}_hybrid/advanced_loss', loss_details['advanced_loss_mean'], on_step=True, on_epoch=True,
+        self.log(f'{stage}_hybrid/advanced_loss', loss_details['advanced_loss_mean'], on_step=log_on_step, on_epoch=True,
                  prog_bar=False, logger=True)
-        self.log(f'{stage}_hybrid/loss', loss_details['hybrid_loss_mean'], on_step=True, on_epoch=True, prog_bar=False,
+        self.log(f'{stage}_hybrid/loss', loss_details['hybrid_loss_mean'], on_step=log_on_step, on_epoch=True, prog_bar=False,
                  logger=True)
-        self.log(f'{stage}_hybrid/advanced_t_fraction', loss_details['advanced_t_fraction'], on_step=True,
+        self.log(f'{stage}_hybrid/advanced_t_fraction', loss_details['advanced_t_fraction'], on_step=log_on_step,
                  on_epoch=True, prog_bar=False, logger=True)
 
     def _to_plot_image(self, tensor):
@@ -514,10 +515,7 @@ class PixelDiffusionConditional(pl.LightningModule):
             ax.axis('off')
         fig.tight_layout()
 
-        self.logger.experiment.log(
-            {"val/reconstruction": wandb.Image(fig)},
-            step=self.global_step,
-        )
+        self.logger.experiment.log({"val/reconstruction": wandb.Image(fig)})
         plt.close(fig)
 
     def _accumulate_val_histogram_samples(self, reconstruction_batch: torch.Tensor):
@@ -583,12 +581,7 @@ class PixelDiffusionConditional(pl.LightningModule):
         fig.suptitle("Validation Reconstruction Histogram (Physical Scale)")
         fig.tight_layout()
 
-        self.logger.experiment.log(
-            {
-                "val/reconstruction_histograms": wandb.Image(fig),
-            },
-            step=self.global_step,
-        )
+        self.logger.experiment.log({"val/reconstruction_histograms": wandb.Image(fig)})
         plt.close(fig)
 
     def _accumulate_phase_error_samples(self, pred_batch: torch.Tensor, target_batch: torch.Tensor):
@@ -630,7 +623,7 @@ class PixelDiffusionConditional(pl.LightningModule):
         ax.set_ylabel("Count")
         ax.grid(alpha=0.25, linestyle="--")
         fig.tight_layout()
-        self.logger.experiment.log({"val/phase_error_histogram": wandb.Image(fig)}, step=self.global_step)
+        self.logger.experiment.log({"val/phase_error_histogram": wandb.Image(fig)})
         plt.close(fig)
 
     def _log_val_magnitude_kde_db(self, pred_batch: torch.Tensor, target_batch: torch.Tensor):
@@ -685,10 +678,7 @@ class PixelDiffusionConditional(pl.LightningModule):
         ax.legend()
         fig.tight_layout()
 
-        self.logger.experiment.log(
-            {"val/magnitude_kde_db": wandb.Image(fig)},
-            step=self.global_step,
-        )
+        self.logger.experiment.log({"val/magnitude_kde_db": wandb.Image(fig)})
         plt.close(fig)
 
     def _inverse_signed_log_normalize(self, tensor: torch.Tensor) -> torch.Tensor:
