@@ -15,6 +15,7 @@ from .EMA import EMAWrapper
 
 def _build_hybrid_diffusion_loss(
         num_timesteps,
+        inverse_norm_fn,
         base_loss='mse',
         ms_ssim_t_limit=10,
         phase_weight=0.5,
@@ -36,30 +37,42 @@ def _build_hybrid_diffusion_loss(
     def _hybrid_diffusion_loss(noise, noise_hat, t):
         base_per_sample = base_loss_fn(noise_hat, noise)
 
-        noise_01 = (noise + 1.0) * 0.5
-        noise_hat_01 = (noise_hat + 1.0) * 0.5
+        pred_physical = inverse_norm_fn(noise_hat)
+        target_physical = inverse_norm_fn(noise)
 
-        custom_betas = (0.0517, 0.3295, 0.3462, 0.2726)
-
-        ms_ssim_per_sample = multiscale_structural_similarity_index_measure(
-            noise_hat_01,
-            noise_01,
-            data_range=1.0,
-            reduction='none',
-            betas=custom_betas
-        )
-        ms_ssim_loss_per_sample = 1.0 - ms_ssim_per_sample
-
-        pred_cplx = PixelDiffusionConditional._to_complex_channels(noise_hat)
-        target_cplx = PixelDiffusionConditional._to_complex_channels(noise)
+        pred_cplx = PixelDiffusionConditional._to_complex_channels(pred_physical)
+        target_cplx = PixelDiffusionConditional._to_complex_channels(target_physical)
 
         pred_phase = torch.angle(pred_cplx)
         target_phase = torch.angle(target_cplx)
 
         phase_diff = torch.abs(pred_phase - target_phase)
         circular_phase_diff = torch.min(phase_diff, 2 * torch.pi - phase_diff)
+
+        pred_mag = torch.abs(pred_cplx)
         target_mag = torch.abs(target_cplx)
+
         phase_loss_per_sample = (circular_phase_diff * target_mag).flatten(1).mean(dim=1)
+
+        pred_mag = pred_mag.unsqueeze(1)
+        target_mag = target_mag.unsqueeze(1)
+
+        # Scale magnitudes to [0, 1] relative to the target's max per batch
+        batch_max = target_mag.amax(dim=(1, 2, 3), keepdim=True).clamp(min=1e-8)
+        pred_mag_01 = pred_mag / batch_max
+        target_mag_01 = target_mag / batch_max
+
+        custom_betas = (0.0517, 0.3295, 0.3462, 0.2726)
+
+        ms_ssim_per_sample = multiscale_structural_similarity_index_measure(
+            pred_mag_01,
+            target_mag_01,
+            data_range=1.0,
+            reduction='none',
+            betas=custom_betas
+        )
+        ms_ssim_loss_per_sample = 1.0 - ms_ssim_per_sample
+
         advanced_loss_per_sample = ms_ssim_loss_per_sample + (phase_weight * phase_loss_per_sample)
 
         use_advanced = (t <= ms_ssim_t_limit)
