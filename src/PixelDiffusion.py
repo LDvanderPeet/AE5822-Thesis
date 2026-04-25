@@ -363,10 +363,8 @@ class PixelDiffusionConditional(pl.LightningModule):
         image = tensor.detach().float().cpu()
 
         if image.shape[0] >= 2:
-            global_max = 2.5
-            log_max = np.log1p(global_max)
-            i = torch.sign(image[0]) * (torch.expm1(torch.abs(image[0]) * log_max))
-            q = torch.sign(image[1]) * (torch.expm1(torch.abs(image[1]) * log_max))
+            i = torch.sign(image[0]) * (torch.expm1(torch.abs(image[0]) * self._log_norm_scale))
+            q = torch.sign(image[1]) * (torch.expm1(torch.abs(image[1]) * self._log_norm_scale))
             mag = torch.sqrt(i.square() + q.square()).numpy()
         else:
             mag = image[0].abs().numpy()
@@ -384,8 +382,11 @@ class PixelDiffusionConditional(pl.LightningModule):
 
         l1 = F.l1_loss(pred, target)
 
-        pred_cplx = self._to_complex_channels(pred)
-        target_cplx = self._to_complex_channels(target)
+        # Compute phase metrics on physical I/Q values (undo signed-log normalization first).
+        pred_physical = self._inverse_signed_log_normalize(pred)
+        target_physical = self._inverse_signed_log_normalize(target)
+        pred_cplx = self._to_complex_channels(pred_physical)
+        target_cplx = self._to_complex_channels(target_physical)
 
         pred_mag = torch.abs(pred_cplx)
         target_mag = torch.abs(target_cplx)
