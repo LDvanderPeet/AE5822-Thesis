@@ -161,8 +161,12 @@ class PixelDiffusionConditional(pl.LightningModule):
         if self.loss_name == 'mse':
             resolved_loss_fn = None
         elif self.loss_name == 'hybrid':
+            def local_inverse_fn(tensor):
+                return torch.sign(tensor) * torch.expm1(torch.abs(tensor) * self._log_norm_scale)
+
             resolved_loss_fn = _build_hybrid_diffusion_loss(
                 num_timesteps=num_timesteps,
+                inverse_norm_fn=local_inverse_fn,
                 base_loss=hybrid_base_loss,
                 ms_ssim_t_limit=hybrid_ms_ssim_t_limt,
                 phase_weight=hybrid_phase_weight,
@@ -412,17 +416,19 @@ class PixelDiffusionConditional(pl.LightningModule):
         phase_coh_vals = []
         phase_err_vals = []
 
+        fixed_data_range = float(self.data_global_max)
+
         for i in range(pred_mag_np.shape[0]):
             p_mag = pred_mag_np[i]
             t_mag = target_mag_np[i]
 
-            psnr_vals.append(peak_signal_noise_ratio(t_mag, p_mag, data_range=math.sqrt(2)))
+            psnr_vals.append(peak_signal_noise_ratio(t_mag, p_mag, data_range=fixed_data_range))
 
             ssim_vals.append(
                 structural_similarity(
                     t_mag,
                     p_mag,
-                    data_range=math.sqrt(2),
+                    data_range=fixed_data_range,
                     channel_axis=0,
                     win_size=11,
                     gaussian_weights=True,
