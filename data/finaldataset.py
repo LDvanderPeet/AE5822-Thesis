@@ -13,26 +13,25 @@ from safetensors.torch import load_file
 
 
 def tfm_dihedral(x, k):
-    """Strip-safe augmentations. Only allows flips/rotations that keep the rectangular aspect ratio.
+    """Strip-safe augmentations. Only allows flips that maintain the rectangular
+    aspect ratio and preserve the relationship between Azimuth and Range axes.
+    Transpositions and 90/270-degree rotations are excluded as they scramble
+    SAR Doppler physics.
 
     Parameters
     ----------
     x : list of torch.Tensor
-        A list containing the data tensors.
+        A list containing the data tensors (typically [input, target]).
     k : int
-        An integer from 0 to 7 defining the specific transformation.
-        0: Identity (original)
-        1: Flip top-bottom
-        2: Flip left-right
-        3: Rotate 180 deg + flip top-bottom
-        4: Flip both
-        5: Transpose + flip left-right
-        6: Transpose
-        7: Full dihedral
+        An integer from 0 to 3 defining the specific transformation:
+        0: Identity (no change)
+        1: Vertical Flip (flips along the height/Azimuth axis)
+        2: Horizontal Flip (flips along the width/Range axis)
+        3: Both Vertical and Horizontal Flip (180-degree rotation)
     """
-    if k in [1, 3, 4, 7]: x = [_x.flip(-2) for _x in x]
-    if k in [2, 4, 5, 7]: x = [_x.flip(-1) for _x in x]
-    if k in [3, 5, 6, 7]: x = [_x.transpose(-2, -1) for _x in x]
+    if k == 1: x = [_x.flip(-2) for _x in x]  # Vertical Flip
+    if k == 2: x = [_x.flip(-1) for _x in x]  # Horizontal Flip
+    if k == 3: x = [_x.flip(-2).flip(-1) for _x in x]  # Both
     return x
 
 
@@ -190,7 +189,7 @@ class SafetensorSARDataset(Dataset):
         x, y = _normalize(x, y, global_max=g_max)
 
         if self.da:
-            x, y = tfm_dihedral([x, y], random.randint(0, 7))
+            x, y = tfm_dihedral([x, y], random.randint(0, 3))
 
         meta_out = {
             "idx": idx,
