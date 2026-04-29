@@ -35,12 +35,11 @@ def tfm_dihedral(x, k):
     return x
 
 
-def _normalize(x, y, global_max=4257):
+def _normalize(x, y, global_max=300):
     """
-    Normalizes real/imaginary channels with a symmetric log mapping.
-
-    The data now contains signed in-phase/quadrature components, so we preserve sign and compress dynamic range via:
-        sign(v) * log1p(abs(v)) / log1p(global_max)
+    Complex Amplitude Compression for interleaved I/Q channels.
+    Compresses the heavy-tailed magnitude using log1p while perfectly
+    preserving the complex phase angle of the I/Q vector.
 
     Parameters
     ----------
@@ -48,14 +47,28 @@ def _normalize(x, y, global_max=4257):
         Input subapertures tensor (channels, H, W).
     y : torch.Tensor
         Output subapertures tensor (channels, H, W).
+    global_max : float
+        Maximum magnitude value observed in the whole dataset.
     """
     x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
     y = torch.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
 
-    x = torch.sign(x) * torch.log1p(torch.abs(x)) / np.log1p(global_max)
-    y = torch.sign(y) * torch.log1p(torch.abs(y)) / np.log1p(global_max)
+    def compress_complex(tensor, g_max):
+        I = tensor[0::2]
+        Q = tensor[1::2]
 
-    return torch.clamp(x, -1.0, 1.0), torch.clamp(y, -1.0, 1.0)
+        A = torch.sqrt(I**2 + Q**2)
+        A_safe = torch.clamp(A, min=1e-8) # prevent division by zero
+
+        A_comp = torch.log1p(A) / np.log1p(g_max)
+
+        out = torch.zeros_like(tensor)
+        out[0::2] = A_comp * (I / A_safe)
+        out[1::2] = A_comp * (Q / A_safe)
+
+        return torch.clamp(out, -1.0, 1.0)
+
+    return compress_complex(x, global_max), compress_complex(y, global_max)
 
 
 class SafetensorSARDataset(Dataset):

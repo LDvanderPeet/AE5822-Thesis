@@ -266,7 +266,7 @@ class PixelDiffusionConditional(pl.LightningModule):
         del outputs, batch, batch_idx
         if self.ema is None:
             return
-        self.ema.update(self.model, step=self.global_step)
+        self.ema.update(self.model, commit=False)
 
     def validation_step(self, batch, batch_idx):     
         """Lightning validation hook.
@@ -386,11 +386,19 @@ class PixelDiffusionConditional(pl.LightningModule):
         else:
             mag = image[0].abs().numpy()
 
-        scale = float(np.mean(mag) + 3.0 * np.std(mag))
-        if scale <= 0.0:
-            scale = 1.0
-        mag = np.clip(mag / scale, 0.0, 1.0)
-        return mag, 'gray'
+        vmax = float(np.percentile(mag, 99.0))
+
+        if vmax <= 0.0:
+            vmax = 1.0
+        mag = np.clip(mag / vmax, 0.0, 1.0)
+
+        return mag, "gray"
+
+        # scale = float(np.mean(mag) + 3.0 * np.std(mag))
+        # if scale <= 0.0:
+        #     scale = 1.0
+        # mag = np.clip(mag / scale, 0.0, 1.0)
+        # return mag, 'gray'
 
     def _compute_reconstruction_metrics(self, pred_batch, target_batch):
         """Compute batch-level reconstruction metrics from [-1, 1] tensors."""
@@ -535,7 +543,7 @@ class PixelDiffusionConditional(pl.LightningModule):
             ax.axis('off')
         fig.tight_layout()
 
-        self.logger.experiment.log({"val/reconstruction": wandb.Image(fig)})
+        self.logger.experiment.log({"val/reconstruction": wandb.Image(fig)}, commit=False)
         plt.close(fig)
 
     def _accumulate_val_histogram_samples(self, reconstruction_batch: torch.Tensor):
@@ -601,7 +609,7 @@ class PixelDiffusionConditional(pl.LightningModule):
         fig.suptitle("Validation Reconstruction Histogram (Physical Scale)")
         fig.tight_layout()
 
-        self.logger.experiment.log({"val/reconstruction_histograms": wandb.Image(fig)})
+        self.logger.experiment.log({"val/reconstruction_histograms": wandb.Image(fig)}, commit=False)
         plt.close(fig)
 
     def _accumulate_phase_error_samples(self, pred_batch: torch.Tensor, target_batch: torch.Tensor):
@@ -643,7 +651,7 @@ class PixelDiffusionConditional(pl.LightningModule):
         ax.set_ylabel("Count")
         ax.grid(alpha=0.25, linestyle="--")
         fig.tight_layout()
-        self.logger.experiment.log({"val/phase_error_histogram": wandb.Image(fig)})
+        self.logger.experiment.log({"val/phase_error_histogram": wandb.Image(fig)}, commit=False)
         plt.close(fig)
 
     def _log_val_magnitude_kde_db(self, pred_batch: torch.Tensor, target_batch: torch.Tensor):
@@ -698,12 +706,38 @@ class PixelDiffusionConditional(pl.LightningModule):
         ax.legend()
         fig.tight_layout()
 
-        self.logger.experiment.log({"val/magnitude_kde_db": wandb.Image(fig)})
+        self.logger.experiment.log({"val/magnitude_kde_db": wandb.Image(fig)}, commit=False)
         plt.close(fig)
 
     def _inverse_signed_log_normalize(self, tensor: torch.Tensor) -> torch.Tensor:
-        """Undo signed log normalization back to physical I/Q scale."""
-        return torch.sign(tensor) * torch.expm1(torch.abs(tensor) * self._log_norm_scale)
+        """Undo Complex Amplitude Compression back to physical I/Q scale.."""
+        out = torch.zeros_like(tensor)
+
+        if tensor.ndim == 4:
+            I_comp = tensor[:, 0::2]
+            Q_comp = tensor[:, 1::2]
+
+            A_comp = torch.sqrt(I_comp ** 2 + Q_comp ** 2)
+            A_comp_safe = torch.clamp(A_comp, min=1e-8)
+
+            A_phys = torch.expm1(A_comp * self._log_norm_scale)
+
+            out[:, 0::2] = A_phys * (I_comp / A_comp_safe)
+            out[:, 1::2] = A_phys * (Q_comp / A_comp_safe)
+
+        else:
+            I_comp = tensor[0::2]
+            Q_comp = tensor[1::2]
+
+            A_comp = torch.sqrt(I_comp ** 2 + Q_comp ** 2)
+            A_comp_safe = torch.clamp(A_comp, min=1e-8)
+
+            A_phys = torch.expm1(A_comp * self._log_norm_scale)
+
+            out[0::2] = A_phys * (I_comp / A_comp_safe)
+            out[1::2] = A_phys * (Q_comp / A_comp_safe)
+
+        return out
 
     def _build_input_panels(self, input_tensor: torch.Tensor):
         """Split condition channels into per-input images and attach human-readable labels."""
