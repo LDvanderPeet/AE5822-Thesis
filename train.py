@@ -13,6 +13,7 @@ from pytorch_lightning.loggers import WandbLogger
 
 from data import PairedDataModule
 from src.PixelDiffusion import PixelDiffusionConditional
+from src.callbacks import WandBPlottingCallback
 
 
 def load_config(config_path: str) -> dict:
@@ -31,24 +32,18 @@ def main() -> None:
     4. Call `trainer.fit(model, datamodule=datamodule)` to start the full train/val loop.
     """
     parser = argparse.ArgumentParser()
-    # Path to the YAML config used for all runtime settings.
     parser.add_argument("--config", type=str, default="configs/config.yaml")
-    # Optional override for Lightning's validation batch fraction/count.
     parser.add_argument("--limit-val-batches", type=float, default=None)
     parser.add_argument("--resume-from-ckpt", type=str, default=None)
     args = parser.parse_args()
 
     config = load_config(args.config)
-    # Ensures deterministic random behavior where possible.
     pl.seed_everything(config.get("seed", 42), workers=True)
-    # Controls float32 matmul precision tradeoff: "medium" (faster) or "high" (more accurate).
     torch.set_float32_matmul_precision(
         config.get("trainer", {}).get("float32_matmul_precision", "high")
     )
 
-    # DataModule centralizes loader construction and setup for Lightning.
     datamodule = PairedDataModule.from_config(config)
-    # Split config sections for clarity.
     model_cfg = config.get("model", {})
     opt_cfg = config.get("optimization", {})
     lr_sched_cfg = opt_cfg.get("reduce_lr_on_plateau", {})
@@ -67,7 +62,6 @@ def main() -> None:
     input_indices = sa_cfg.get("input_indices", [])
     input_condition_labels = [f"SA{int(idx)}" if int(idx) > 0 else "FA" for idx in input_indices]
 
-    # This is the Lightning model used for training and validation.
     model = PixelDiffusionConditional(
         condition_channels=model_cfg.get("in_channels", 2),
         generated_channels=model_cfg.get("out_channels", 2),
@@ -91,28 +85,31 @@ def main() -> None:
         ema_beta=ema_cfg.get("beta", 0.9999),
         ema_update_every=ema_cfg.get("update_every", 1),
         ema_update_after_step=ema_cfg.get("update_after_step", 0),
-        phase_hist_max_batches=model_cfg.get("phase_hist_max_batches", 8),
-        data_global_max=config.get("data", {}).get("global_max", 4257.0),
+        data_global_max=config.get("data", {}).get("global_max", 300.0),
         wandb_save_config_file=wandb_cfg.get("save_config_file", True),
         config_path=args.config,
         wandb_config_artifact_name=wandb_cfg.get("config_artifact_name"),
     )
 
+    visualizer_callback = WandBPlottingCallback(
+        target_label="FA",
+        phase_hist_max_batches=model_cfg.get("phase_hist_max_batches", 8)
+    )
+
     trainer_cfg = config.get("trainer", {})
-    # CLI override has priority over config file value.
     limit_val_batches = (
         args.limit_val_batches
         if args.limit_val_batches is not None
         else trainer_cfg.get("limit_val_batches", 1.0)
     )
-    # Lightning logger wrapper for Weights & Biases.
+
     wandb_logger = WandbLogger(
         project=wandb_cfg.get("project", "dif_img_rec"),
         name=wandb_cfg.get("name"),
         save_dir=str(wandb_local_dir),
         log_model=wandb_cfg.get("log_model", False),
     )
-    # Trainer controls loop behavior, device placement, precision, and logging cadence.
+
     lr_monitor = LearningRateMonitor(logging_interval="step")
     checkpoint_cfg = trainer_cfg.get("checkpointing", {})
     checkpoint_base_dir = Path(checkpoint_cfg.get("dirpath", "checkpoints")).expanduser()
@@ -139,10 +136,9 @@ def main() -> None:
         gradient_clip_val=trainer_cfg.get("gradient_clip_val", 1.0),
         gradient_clip_algorithm=trainer_cfg.get("gradient_clip_algorithm", "norm"),
         logger=wandb_logger,
-        callbacks=[lr_monitor, checkpoint_callback],
+        callbacks=[lr_monitor, checkpoint_callback, visualizer_callback],
     )
 
-    # Starts the training/validation loop.
     trainer.fit(model, datamodule=datamodule, ckpt_path=args.resume_from_ckpt)
 
 

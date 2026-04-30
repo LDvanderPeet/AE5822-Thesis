@@ -1,13 +1,8 @@
 import os
 import random
-import yaml
 import numpy as np
-import json
-import zarr
 import torch
-from torch.utils.data import Dataset, DataLoader
-import glob
-import h5py
+from torch.utils.data import Dataset
 from safetensors.torch import load_file
 
 
@@ -79,17 +74,26 @@ class SafetensorSARDataset(Dataset):
 
     def __init__(self, cfg, split='train', da=False):
         """
-                Initializes the dataset with a Spatial Zone Split per product.
+        Initializes the dataset with a Spatial Zone Split per product.
 
-                Logic:
-                1. Identify all product directories.
-                2. For EVERY product, split its patches geographically:
-                   - Top 70%: Training
-                   - Middle 15%: Validation (with buffer)
-                   - Bottom 15%: Testing (with buffer)
-                3. Accumulate all patches for the requested split.
-                4. Shuffle and cap the total count (100k for train, 10k for val/test).
-                """
+        Logic:
+        1. Identify all product directories.
+        2. For EVERY product, split its patches geographically:
+           - Top 70%: Training
+           - Middle 15%: Validation (with buffer)
+           - Bottom 15%: Testing (with buffer)
+        3. Accumulate all patches for the requested split.
+        4. Shuffle and cap the total count (100k for train, 10k for val/test).
+
+        Parameters
+        ----------
+        cfg : dict
+            Configuration dictionary containing data roots and subaperture settings.
+        split : str
+            Dataset split to load ('train', 'valid', or 'test').
+        da : bool
+            Whether to apply data augmentation.
+        """
         self.cfg = cfg
         self.da = da
         self.root_dir = cfg["data"]["root_dir"]
@@ -97,41 +101,32 @@ class SafetensorSARDataset(Dataset):
         self.input_indices = cfg["data"]["subaperture_config"].get("input_indices", [1, 3])
         self.output_indices = cfg["data"]["subaperture_config"].get("output_indices", [0])
 
-        # 1. Get all unique product directories
-        # We use all products to maximize geographical diversity
         all_products = sorted([
             d for d in os.listdir(self.root_dir)
             if os.path.isdir(os.path.join(self.root_dir, d))
         ])
 
         self.files = []
-        # A buffer of patches to prevent spatial leakage at the boundaries
-        # If your patches overlap by 50%, a buffer of 2 ensures no shared pixels.
         buffer_size = 2
 
-        # 2. Extract patches from EVERY product based on the spatial split
         for prod in all_products:
             prod_path = os.path.join(self.root_dir, prod)
 
-            # Sorting is CRITICAL to ensure the top-to-bottom spatial order
             all_patches = sorted([
                 f for f in os.listdir(prod_path)
                 if f.endswith('.safetensors')
             ])
 
             n = len(all_patches)
-            if n < 20:  # Skip products that are too small to split meaningfully
+            if n < 20:
                 continue
 
-            # Calculate geographical split indices (70% / 15% / 15%)
+            # Geographical split indices (70% / 15% / 15%)
             train_end = int(n * 0.70)
-
             val_start = train_end + buffer_size
             val_end = int(n * 0.85)
-
             test_start = val_end + buffer_size
 
-            # Select patches based on the requested split
             if split == 'train':
                 selected_filenames = all_patches[:train_end]
             elif split == 'valid':
@@ -141,11 +136,8 @@ class SafetensorSARDataset(Dataset):
             else:
                 raise ValueError(f"Invalid split name: {split}")
 
-            # Accumulate full paths
             self.files.extend([os.path.join(prod_path, f) for f in selected_filenames])
 
-        # 3. Global Shuffle and Cap
-        # This ensures the 100k patches are a random mix from all available products
         random.seed(self.cfg.get("seed", 42))
         random.shuffle(self.files)
 
@@ -154,7 +146,6 @@ class SafetensorSARDataset(Dataset):
         else:
             limit = 10000
 
-        # Apply the limit to keep the dataset size manageable
         self.files = self.files[:limit]
 
         print(f"--- {split.upper()} Set Initialized ---")
@@ -167,8 +158,14 @@ class SafetensorSARDataset(Dataset):
 
     def _select_channels(self, full_tensor, indices):
         """
-        Maps the logical indices (0=Full, 1=SA1, 2=SA2, 3=SA3)
-        and polarizations (VV, VH) to the 16 physical channels.
+        Maps logical subaperture indices and polarizations to physical channels.
+
+        Parameters
+        ----------
+        full_tensor : torch.Tensor
+            The raw 16-channel tensor from the safetensor file.
+        indices : list
+            Logical indices for sub-apertures (0=Full, 1=SA1, etc.).
         """
         selected = []
         for sa_idx in indices:
@@ -198,7 +195,7 @@ class SafetensorSARDataset(Dataset):
         x = self._select_channels(full_tensor, self.input_indices)
         y = self._select_channels(full_tensor, self.output_indices)
 
-        g_max = self.cfg["data"].get("global_max", 2.5)
+        g_max = self.cfg["data"].get("global_max", 300)
         x, y = _normalize(x, y, global_max=g_max)
 
         if self.da:
@@ -212,12 +209,6 @@ class SafetensorSARDataset(Dataset):
 
         return x, y, meta_out
 
-
-    def _complex_to_channels(self, arr):
-        mag = np.abs(arr).astype(np.float32)
-        phase = np.angle(arr).astype(np.float32)
-        combined = np.stack([mag, phase], axis=0)  # (2, H, W)
-        return torch.from_numpy(combined)
 
 if __name__ == "__main__":
     ## ---- TEST ---- ##
