@@ -49,14 +49,11 @@ def _build_hybrid_diffusion_loss(
         pred_mag = torch.abs(pred_cplx)
         target_mag = torch.abs(target_cplx)
 
-        phase_loss_per_sample = (circular_phase_diff * target_mag).flatten(1).mean(dim=1)
-
-        pred_mag = pred_mag.unsqueeze(1)
-        target_mag = target_mag.unsqueeze(1)
-
         batch_max = target_mag.amax(dim=(1, 2, 3), keepdim=True).clamp(min=1e-8)
         pred_mag_01 = (pred_mag / batch_max).clamp(min=0.0, max=1.0)
         target_mag_01 = target_mag / batch_max
+
+        phase_loss_per_sample = (circular_phase_diff * target_mag_01).flatten(1).mean(dim=1)
 
         custom_betas = (0.0517, 0.3295, 0.3462, 0.2726)
 

@@ -82,7 +82,9 @@ class WandBPlottingCallback(Callback):
         else:
             mag = phys_image[0].abs().numpy()
 
-        vmax = float(np.percentile(mag, 99.0))
+        mean = np.mean(mag)
+        std = np.std(mag)
+        vmax = float(mean + 3.0 * std)
         if vmax <= 0.0:
             vmax = 1.0
 
