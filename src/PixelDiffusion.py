@@ -50,20 +50,39 @@ def _build_hybrid_diffusion_loss(
         target_mag = torch.abs(target_cplx)
 
         batch_max = target_mag.amax(dim=(1, 2, 3), keepdim=True).clamp(min=1e-8)
-        pred_mag_01 = (pred_mag / batch_max).clamp(min=0.0, max=1.0)
+        # pred_mag_01 = (pred_mag / batch_max).clamp(min=0.0, max=1.0)
         target_mag_01 = target_mag / batch_max
 
         phase_loss_per_sample = (circular_phase_diff * target_mag_01).flatten(1).mean(dim=1)
 
+        pred_real = pred_cplx.real
+        pred_imag = pred_cplx.imag
+        target_real = target_cplx.real
+        target_imag = target_cplx.imag
+
+        pred_real_01 = ((pred_real / batch_max).clamp(-1.0, 1.0) + 1.0) / 2.0
+        target_real_01 = ((target_real / batch_max).clamp(-1.0, 1.0) + 1.0) / 2.0
+        pred_imag_01 = ((pred_imag / batch_max).clamp(-1.0, 1.0) + 1.0) / 2.0
+        target_imag_01 = ((target_imag / batch_max).clamp(-1.0, 1.0) + 1.0) / 2.0
+
         custom_betas = (0.0517, 0.3295, 0.3462, 0.2726)
 
-        ms_ssim_per_sample = multiscale_structural_similarity_index_measure(
-            pred_mag_01,
-            target_mag_01,
-            data_range=1.0,
-            reduction='none',
-            betas=custom_betas
+        ms_ssim_real = multiscale_structural_similarity_index_measure(
+            pred_real_01, target_real_01, data_range=1.0, reduction='none', betas=custom_betas
         )
+        ms_ssim_imag = multiscale_structural_similarity_index_measure(
+            pred_imag_01, target_imag_01, data_range=1.0, reduction='none', betas=custom_betas
+        )
+
+        ms_ssim_per_sample = (ms_ssim_real + ms_ssim_imag) / 2.0
+
+        # ms_ssim_per_sample = multiscale_structural_similarity_index_measure(
+        #     pred_mag_01,
+        #     target_mag_01,
+        #     data_range=1.0,
+        #     reduction='none',
+        #     betas=custom_betas
+        # )
         ms_ssim_loss_per_sample = 1.0 - ms_ssim_per_sample
 
         advanced_loss_per_sample = ms_ssim_loss_per_sample + (phase_weight * phase_loss_per_sample)
