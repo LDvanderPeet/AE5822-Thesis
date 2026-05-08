@@ -16,6 +16,7 @@ def _build_hybrid_diffusion_loss(
         inverse_norm_fn,
         base_loss='mse',
         ms_ssim_t_limit=10,
+        ms_ssim_weight=15.0,
         phase_weight=0.5,
 ):
     """Create timestep-aware hybrid loss for diffusion training.
@@ -85,17 +86,20 @@ def _build_hybrid_diffusion_loss(
         # )
         ms_ssim_loss_per_sample = 1.0 - ms_ssim_per_sample
 
-        advanced_loss_per_sample = ms_ssim_loss_per_sample + (phase_weight * phase_loss_per_sample)
+        advanced_penalty_per_sample = (ms_ssim_weight * ms_ssim_loss_per_sample) + (phase_weight * phase_loss_per_sample)
 
         use_advanced = (t <= ms_ssim_t_limit)
-        hybrid_per_sample = torch.where(use_advanced, advanced_loss_per_sample, base_per_sample)
+        hybrid_per_sample = torch.where(use_advanced,
+                                        base_per_sample + advanced_penalty_per_sample,
+                                        base_per_sample
+        )
         loss = hybrid_per_sample.mean()
 
         details = {
             "base_loss_mean": base_per_sample.mean().detach(),
             "ms_ssim_loss_mean": ms_ssim_loss_per_sample.mean().detach(),
             "phase_loss_mean": phase_loss_per_sample.mean().detach(),
-            "advanced_loss_mean": advanced_loss_per_sample.mean().detach(),
+            "advanced_loss_mean": advanced_penalty_per_sample.mean().detach(),
             "hybrid_loss_mean": loss.detach(),
             "advanced_t_fraction": use_advanced.float().mean().detach(),
         }
@@ -127,6 +131,7 @@ class PixelDiffusionConditional(pl.LightningModule):
                  loss_fn='mse',
                  hybrid_base_loss='mse',
                  hybrid_ms_ssim_t_limt=10,
+                 hybrid_ms_ssim_weight=15.0,
                  hybrid_phase_weight=0.5,
                  model_dim=64,
                  model_dim_mults=(1,2,4,8),
@@ -174,6 +179,7 @@ class PixelDiffusionConditional(pl.LightningModule):
                 inverse_norm_fn=self._inverse_signed_log_normalize,
                 base_loss=hybrid_base_loss,
                 ms_ssim_t_limit=hybrid_ms_ssim_t_limt,
+                ms_ssim_weight=hybrid_ms_ssim_weight,
                 phase_weight=hybrid_phase_weight,
             )
         elif self.loss_name == 'mae':
