@@ -23,6 +23,7 @@ data:
     num_patches: 128 # Number of unique patches shared by both train and valid loaders.
 
 model:
+  type: diffusion # diffusion (default) or DC2SCN baseline
   in_channels: 4  # Channels in the conditional input x.
   out_channels: 2  # Channels in the reconstruction target y.
   num_timesteps: 1000  # Number of diffusion denoising steps.
@@ -38,6 +39,10 @@ model:
     beta: 0.9999  # EMA decay. Closer to 1.0 means smoother but slower-reacting EMA weights.
     update_every: 1  # Apply EMA update every N train batches.
     update_after_step: 10000  # Start EMA smoothing after this many updates; before that copy weights directly.
+  dc2scn:
+    width: 64
+    num_blocks: 6
+    growth_rate: 32
   unet:
     dim: 64  # Base UNet width. Previous setting was 64; 48 reduces parameter count to about half (30M instead of 55M).
     dim_mults: [1, 2, 4, 8]  # Width multipliers per UNet level.

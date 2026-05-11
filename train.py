@@ -13,6 +13,7 @@ from pytorch_lightning.loggers import WandbLogger
 
 from data import PairedDataModule
 from src.PixelDiffusion import PixelDiffusionConditional
+from src.DC2SCN import DC2SCNLightning
 from src.callbacks import WandBPlottingCallback, DC2SCNPhaseRowCallback
 
 
@@ -62,35 +63,48 @@ def main() -> None:
     input_indices = sa_cfg.get("input_indices", [])
     input_condition_labels = [f"SA{int(idx)}" if int(idx) > 0 else "FA" for idx in input_indices]
 
-    model = PixelDiffusionConditional(
+    model_type = str(model_cfg.get("type", "diffusion")).lower()
+    common_model_kwargs = dict(
         condition_channels=model_cfg.get("in_channels", 2),
         generated_channels=model_cfg.get("out_channels", 2),
         input_condition_labels=input_condition_labels if input_condition_labels else None,
         target_label="FA",
-        num_timesteps=model_cfg.get("num_timesteps", 1000),
-        schedule=model_cfg.get("schedule", "linear"),
-        noise_offset=model_cfg.get("noise_offset", 0),
-        loss_fn=model_cfg.get("loss_fn", 'mse'),
-        hybrid_base_loss=model_cfg.get("hybrid_base_loss", "mse"),
-        hybrid_ms_ssim_t_limt=model_cfg.get("hybrid_ms_ssim_t_limit", 10),
-        hybrid_ms_ssim_weight=model_cfg.get("hybrid_ms_ssim_weight", 15.0),
-        hybrid_phase_weight=model_cfg.get("hybrid_phase_weight", 0.5),
-        model_dim=unet_cfg.get("dim", 64),
-        model_dim_mults=tuple(unet_cfg.get("dim_mults", [1, 2, 4, 8])),
-        model_channels=unet_cfg.get("channels"),
-        model_out_dim=unet_cfg.get("out_dim"),
         lr=opt_cfg.get("lr", 1e-3),
         lr_scheduler_factor=lr_sched_cfg.get("factor", 0.5),
         lr_scheduler_patience=lr_sched_cfg.get("patience", 10),
-        ema_enabled=ema_cfg.get("enabled", False),
-        ema_beta=ema_cfg.get("beta", 0.9999),
-        ema_update_every=ema_cfg.get("update_every", 1),
-        ema_update_after_step=ema_cfg.get("update_after_step", 0),
         data_global_max=config.get("data", {}).get("global_max", 300.0),
-        wandb_save_config_file=wandb_cfg.get("save_config_file", True),
-        config_path=args.config,
-        wandb_config_artifact_name=wandb_cfg.get("config_artifact_name"),
     )
+    if model_type == "dc2scn":
+        dc2scn_cfg = model_cfg.get("dc2scn", {})
+        model = DC2SCNLightning(
+            **common_model_kwargs,
+            width=dc2scn_cfg.get("width", 64),
+            num_blocks=dc2scn_cfg.get("num_blocks", 6),
+            growth_rate=dc2scn_cfg.get("growth_rate", 32),
+        )
+    else:
+        model = PixelDiffusionConditional(
+            **common_model_kwargs,
+            num_timesteps=model_cfg.get("num_timesteps", 1000),
+            schedule=model_cfg.get("schedule", "linear"),
+            noise_offset=model_cfg.get("noise_offset", 0),
+            loss_fn=model_cfg.get("loss_fn", 'mse'),
+            hybrid_base_loss=model_cfg.get("hybrid_base_loss", "mse"),
+            hybrid_ms_ssim_t_limt=model_cfg.get("hybrid_ms_ssim_t_limit", 10),
+            hybrid_ms_ssim_weight=model_cfg.get("hybrid_ms_ssim_weight", 15.0),
+            hybrid_phase_weight=model_cfg.get("hybrid_phase_weight", 0.5),
+            model_dim=unet_cfg.get("dim", 64),
+            model_dim_mults=tuple(unet_cfg.get("dim_mults", [1, 2, 4, 8])),
+            model_channels=unet_cfg.get("channels"),
+            model_out_dim=unet_cfg.get("out_dim"),
+            ema_enabled=ema_cfg.get("enabled", False),
+            ema_beta=ema_cfg.get("beta", 0.9999),
+            ema_update_every=ema_cfg.get("update_every", 1),
+            ema_update_after_step=ema_cfg.get("update_after_step", 0),
+            wandb_save_config_file=wandb_cfg.get("save_config_file", True),
+            config_path=args.config,
+            wandb_config_artifact_name=wandb_cfg.get("config_artifact_name"),
+        )
 
     visualizer_callback = WandBPlottingCallback(
         target_label="FA",
