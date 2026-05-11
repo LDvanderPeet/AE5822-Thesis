@@ -35,36 +35,47 @@ def _build_hybrid_diffusion_loss(
     def _hybrid_diffusion_loss(noise, noise_hat, t):
         base_per_sample = base_loss_fn(noise_hat, noise)
 
-        pred_physical = inverse_norm_fn(noise_hat.clamp(-1.0, 1.0))
-        target_physical = inverse_norm_fn(noise)
+        mask = (t <= ms_ssim_t_limit)
+
+        if not mask.any():
+            loss = base_per_sample.mean()
+            details = {
+                "base_loss_mean": loss.detach(),
+                "ms_ssim_loss_mean": torch.tensor(0.0, device=loss.device),
+                "phase_loss_mean": torch.tensor(0.0, device=loss.device),
+                "advanced_loss_mean": torch.tensor(0.0, device=loss.device),
+                "hybrid_loss_mean": loss.detach(),
+                "advanced_t_fraction": torch.tensor(0.0, device=loss.device),
+            }
+            return loss, details
+
+        adv_noise_hat = noise_hat[mask]
+        adv_noise = noise[mask]
+
+        pred_physical = inverse_norm_fn(adv_noise_hat.clamp(-1.0, 1.0))
+        target_physical = inverse_norm_fn(adv_noise)
 
         pred_cplx = PixelDiffusionConditional._to_complex_channels(pred_physical)
         target_cplx = PixelDiffusionConditional._to_complex_channels(target_physical)
-
-        pred_phase = torch.angle(pred_cplx)
-        target_phase = torch.angle(target_cplx)
-
-        phase_diff = torch.abs(pred_phase - target_phase)
-        circular_phase_diff = torch.min(phase_diff, 2 * torch.pi - phase_diff)
 
         pred_mag = torch.abs(pred_cplx)
         target_mag = torch.abs(target_cplx)
 
         batch_max = target_mag.amax(dim=(1, 2, 3), keepdim=True).clamp(min=1e-8)
-        # pred_mag_01 = (pred_mag / batch_max).clamp(min=0.0, max=1.0)
         target_mag_01 = target_mag / batch_max
 
-        phase_loss_per_sample = (circular_phase_diff * target_mag_01).flatten(1).mean(dim=1)
+        ## Phase math
+        pred_phase = torch.angle(pred_cplx)
+        target_phase = torch.angle(target_cplx)
+        phase_diff = torch.abs(pred_phase - target_phase)
+        circular_phase_diff = torch.min(phase_diff, 2 * torch.pi - phase_diff)
+        phase_loss_subset = (circular_phase_diff * target_mag_01).flatten(1).mean(dim=1)
 
-        pred_real = pred_cplx.real
-        pred_imag = pred_cplx.imag
-        target_real = target_cplx.real
-        target_imag = target_cplx.imag
-
-        pred_real_01 = ((pred_real / batch_max).clamp(-1.0, 1.0) + 1.0) / 2.0
-        target_real_01 = ((target_real / batch_max).clamp(-1.0, 1.0) + 1.0) / 2.0
-        pred_imag_01 = ((pred_imag / batch_max).clamp(-1.0, 1.0) + 1.0) / 2.0
-        target_imag_01 = ((target_imag / batch_max).clamp(-1.0, 1.0) + 1.0) / 2.0
+        ## MS-SSIM math
+        pred_real_01 = ((pred_cplx.real / batch_max).clamp(-1.0, 1.0) + 1.0) / 2.0
+        target_real_01 = ((target_cplx.real / batch_max).clamp(-1.0, 1.0) + 1.0) / 2.0
+        pred_imag_01 = ((pred_cplx.imag / batch_max).clamp(-1.0, 1.0) + 1.0) / 2.0
+        target_imag_01 = ((target_cplx.imag / batch_max).clamp(-1.0, 1.0) + 1.0) / 2.0
 
         custom_betas = (0.0517, 0.3295, 0.3462, 0.2726)
 
@@ -75,33 +86,24 @@ def _build_hybrid_diffusion_loss(
             pred_imag_01, target_imag_01, data_range=1.0, reduction='none', betas=custom_betas
         )
 
-        ms_ssim_per_sample = (ms_ssim_real + ms_ssim_imag) / 2.0
+        ms_ssim_subset = (ms_ssim_real + ms_ssim_imag) / 2.0
+        ms_ssim_loss_subset = 1.0 - ms_ssim_subset
 
-        # ms_ssim_per_sample = multiscale_structural_similarity_index_measure(
-        #     pred_mag_01,
-        #     target_mag_01,
-        #     data_range=1.0,
-        #     reduction='none',
-        #     betas=custom_betas
-        # )
-        ms_ssim_loss_per_sample = 1.0 - ms_ssim_per_sample
+        advanced_penalty_subset = (ms_ssim_weight * ms_ssim_loss_subset) + (phase_weight * phase_loss_subset)
 
-        advanced_penalty_per_sample = (ms_ssim_weight * ms_ssim_loss_per_sample) + (phase_weight * phase_loss_per_sample)
+        advanced_per_sample = torch.zeros_like(base_per_sample)
+        advanced_per_sample[mask] = advanced_penalty_subset
 
-        use_advanced = (t <= ms_ssim_t_limit)
-        hybrid_per_sample = torch.where(use_advanced,
-                                        base_per_sample + advanced_penalty_per_sample,
-                                        base_per_sample
-        )
+        hybrid_per_sample = base_per_sample + advanced_per_sample
         loss = hybrid_per_sample.mean()
 
         details = {
             "base_loss_mean": base_per_sample.mean().detach(),
-            "ms_ssim_loss_mean": ms_ssim_loss_per_sample.mean().detach(),
-            "phase_loss_mean": phase_loss_per_sample.mean().detach(),
-            "advanced_loss_mean": advanced_penalty_per_sample.mean().detach(),
+            "ms_ssim_loss_mean": ms_ssim_loss_subset.mean().detach(),
+            "phase_loss_mean": phase_loss_subset.mean().detach(),
+            "advanced_loss_mean": advanced_penalty_subset.mean().detach(),
             "hybrid_loss_mean": loss.detach(),
-            "advanced_t_fraction": use_advanced.float().mean().detach(),
+            "advanced_t_fraction": mask.float().mean().detach(),
         }
         return loss, details
 

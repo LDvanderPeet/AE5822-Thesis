@@ -184,7 +184,6 @@ class WandBPlottingCallback(Callback):
         plt.close(fig)
 
     def _accumulate_histograms(self, pl_module, pred_batch, target_batch):
-        # 1. Standard Histograms
         reconstruction_physical = pl_module._inverse_signed_log_normalize(pred_batch.detach().float())
         recon_complex = pl_module._to_complex_channels(reconstruction_physical)
 
@@ -202,7 +201,6 @@ class WandBPlottingCallback(Callback):
         self._val_hist_imag_samples.append(_subsample(imag_vals))
         self._val_hist_mag_samples.append(_subsample(mag_vals))
 
-        # 2. Phase Error Histogram
         target_physical = pl_module._inverse_signed_log_normalize(target_batch.detach().float())
         target_cplx = pl_module._to_complex_channels(target_physical)
 
@@ -214,7 +212,6 @@ class WandBPlottingCallback(Callback):
                 self._val_hist_real_samples) == 0:
             return
 
-        # Plot 1: Real, Imag, Mag
         real_vals = np.concatenate(self._val_hist_real_samples)
         imag_vals = np.concatenate(self._val_hist_imag_samples)
         mag_vals = np.concatenate(self._val_hist_mag_samples)
@@ -244,7 +241,6 @@ class WandBPlottingCallback(Callback):
         pl_module.logger.experiment.log({"val/reconstruction_histograms": wandb.Image(fig)}, commit=False)
         plt.close(fig)
 
-        # Plot 2: Phase Error
         phase_vals = _cap_samples(np.concatenate(self._val_phase_err_samples))
 
         fig, ax = plt.subplots(1, 1, figsize=(6, 4))
@@ -257,3 +253,68 @@ class WandBPlottingCallback(Callback):
 
         pl_module.logger.experiment.log({"val/phase_error_histogram": wandb.Image(fig)}, commit=False)
         plt.close(fig)
+
+
+class DC2SCNPhaseRowCallback(pl.Callback):
+    """
+    Extracts a 1D slice of the phase at the brightest target (like DC2SCN)
+    and plots the Reference Phase vs. Predicted Phase to Weights & Biases.
+    """
+
+    def __init__(self, num_samples=1):
+        super().__init__()
+        self.num_samples = num_samples
+
+    def on_validation_epoch_end(self, trainer, pl_module):
+        if trainer.logger is None or not hasattr(trainer.logger, 'experiment'):
+            return
+
+        val_dataloader = trainer.datamodule.val_dataloader()
+        batch = next(iter(val_dataloader))
+
+        x, y = batch
+        x = x[:self.num_samples].to(pl_module.device)
+        y = y[:self.num_samples].to(pl_module.device)
+
+        with torch.no_grad():
+            if hasattr(pl_module.model, 'sample'):
+                preds = pl_module.model.sample(x)
+            else:
+                preds = pl_module(x)
+
+        target_phys = pl_module._inverse_signed_log_normalize(y)
+        pred_phys = pl_module._inverse_signed_log_normalize(preds.clamp(-1.0, 1.0))
+
+        target_cplx = pl_module._to_complex_channels(target_phys)
+        pred_cplx = pl_module._to_complex_channels(pred_phys)
+
+        plots = []
+
+        for i in range(self.num_samples):
+            mag = torch.abs(target_cplx[i, 0])  # Shape: [H, W]
+
+            max_idx = torch.argmax(mag)
+            y_max, x_max = np.unravel_index(max_idx.cpu().numpy(), mag.shape)
+
+            target_phase = torch.angle(target_cplx[i, 0, y_max, :]).cpu().numpy()
+            pred_phase = torch.angle(pred_cplx[i, 0, y_max, :]).cpu().numpy()
+
+            fig, ax = plt.subplots(figsize=(10, 4))
+            ax.plot(target_phase, label="Reference Phase", color='blue', linestyle='--', linewidth=2)
+            ax.plot(pred_phase, label="Predicted Phase", color='red', alpha=0.7, linewidth=2)
+
+            ax.set_title(f"1D Phase Slice at Row {y_max} (Peak Target)")
+            ax.set_xlabel("Range (Pixels)")
+            ax.set_ylabel("Phase (Radians)")
+            ax.set_ylim(-np.pi, np.pi)
+            ax.grid(True, alpha=0.3)
+            ax.legend(loc="upper right")
+            plt.tight_layout()
+
+            plots.append(wandb.Image(fig, caption=f"Sample {i} - Row {y_max}"))
+            plt.close(fig)  # Free memory to prevent memory leaks
+
+        trainer.logger.experiment.log({
+            "val/dc2scn_phase_slice": plots,
+            "global_step": trainer.global_step
+        })
