@@ -33,14 +33,17 @@ class _DenseDilatedBlock(nn.Module):
 
 
 class DC2SCNNet(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int, width: int = 64, num_blocks: int = 6, growth_rate: int = 32):
+    def __init__(self, in_channels: int, out_channels: int, width: int = 64, num_blocks: int = 6,
+                 growth_rate: int = 32):
         super().__init__()
         self.head = nn.Sequential(
             nn.Conv2d(in_channels, width, kernel_size=3, padding=1, bias=False),
             nn.ReLU(inplace=True),
         )
         self.blocks = nn.Sequential(*[_DenseDilatedBlock(width, growth_rate=growth_rate) for _ in range(num_blocks)])
-        self.tail = nn.Conv2d(width, out_channels, kernel_size=3, padding=1)
+
+        # Addabbo NiN (Network-in-Network) Layer: kernel_size=1, padding=0
+        self.tail = nn.Conv2d(width, out_channels, kernel_size=1, padding=0)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         f = self.head(x)
@@ -73,24 +76,73 @@ class DC2SCNLightning(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         x, y = batch
-        pred = self(x)
-        loss = F.l1_loss(pred, y)
-        self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
-        return loss
+
+        # 1. NETWORK PREDICTION
+        pred_norm = self(x)
+
+        # 2. INVERSE NORMALIZATION
+        pred_phys = self._inverse_signed_log_normalize(pred_norm)
+        y_phys = self._inverse_signed_log_normalize(y)
+
+        pred_cplx = self._to_complex_channels(pred_phys)
+        y_cplx = self._to_complex_channels(y_phys)
+
+        # 3. GRADIENT-SAFE PHYSICAL LOSSES
+        # Magnitude Loss
+        loss_mag = F.l1_loss(torch.abs(pred_cplx), torch.abs(y_cplx))
+
+        # Phase Loss (Unit Vector Distance)
+        # We divide by magnitude (plus epsilon) to extract pure phase as a unit vector on a circle.
+        eps = 1e-8
+        pred_unit = pred_cplx / (torch.abs(pred_cplx) + eps)
+        y_unit = y_cplx / (torch.abs(y_cplx) + eps)
+
+        # The squared distance between two complex unit vectors safely penalizes phase misalignment
+        # without ever using the unstable torch.angle() derivative!
+        loss_phase = torch.mean(torch.abs(pred_unit - y_unit) ** 2)
+
+        # 4. Total Loss
+        total_loss = loss_mag + (0.5 * loss_phase)
+
+        self.log('train_loss', total_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
+        self.log('train_mag_loss', loss_mag, on_step=True, on_epoch=False, logger=True)
+        self.log('train_phase_loss', loss_phase, on_step=True, on_epoch=False, logger=True)
+
+        return total_loss
 
     def validation_step(self, batch, batch_idx):
         x, y = batch
-        pred = self(x)
-        loss = F.l1_loss(pred, y)
-        self.log('val_loss', loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
+
+        pred_norm = self(x)
+
+        pred_phys = self._inverse_signed_log_normalize(pred_norm)
+        y_phys = self._inverse_signed_log_normalize(y)
+
+        pred_cplx = self._to_complex_channels(pred_phys)
+        y_cplx = self._to_complex_channels(y_phys)
+
+        # Same Gradient-Safe losses for validation
+        loss_mag = F.l1_loss(torch.abs(pred_cplx), torch.abs(y_cplx))
+
+        eps = 1e-8
+        pred_unit = pred_cplx / (torch.abs(pred_cplx) + eps)
+        y_unit = y_cplx / (torch.abs(y_cplx) + eps)
+        loss_phase = torch.mean(torch.abs(pred_unit - y_unit) ** 2)
+
+        val_loss = loss_mag + (0.5 * loss_phase)
+
+        self.log('val_loss', val_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
+
         if batch_idx == 0:
-            psnr, ssim, l1, phase_coh, phase_err = self._compute_reconstruction_metrics(pred, y)
+            psnr, ssim, l1, phase_coh, phase_err = self._compute_reconstruction_metrics(pred_norm, y)
+
             self.log('val_recon_psnr', psnr, on_step=False, on_epoch=True, prog_bar=True, logger=True)
             self.log('val_recon_ssim', ssim, on_step=False, on_epoch=True, prog_bar=True, logger=True)
             self.log('val_recon_l1', l1, on_step=False, on_epoch=True, prog_bar=True, logger=True)
             self.log('val_recon_phase_coherence', phase_coh, on_step=False, on_epoch=True, prog_bar=True, logger=True)
             self.log('val_recon_phase_error', phase_err, on_step=False, on_epoch=True, prog_bar=True, logger=True)
-        return loss
+
+        return val_loss
 
     def predict_step(self, batch, batch_idx, dataloader_idx=0):
         del batch_idx, dataloader_idx
