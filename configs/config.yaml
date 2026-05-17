@@ -28,7 +28,7 @@ model:
   out_channels: 2  # Channels in the reconstruction target y.
   num_timesteps: 1000  # Number of diffusion denoising steps.
   schedule: cosine  # Beta schedule variant for the forward process.
-  loss_fn: mse # 'mse' (L2), 'mae' (L1), or 'hybrid' (MS-SSIM for low t and L1/L2 otherwise).
+  loss_fn: hybrid # 'mse' (L2), 'mae' (L1), or 'hybrid' (MS-SSIM for low t and L1/L2 otherwise).
   hybrid_base_loss: mse # Only used when loss_fn='hybrid': choose fallback loss at high t ('mse' or 'mae').
   hybrid_ms_ssim_weight: 15.0
   hybrid_phase_weight: 0.0 # Only used when loss_fn='hybrid': scales the circular phase term inside the advanced loss.
@@ -78,7 +78,7 @@ trainer:
 logging:
   wandb:
     project: dif_img_rec  # Weights & Biases project name.
-    name: capability_test  # Optional run name; null lets W&B auto-generate one.
+    name: diffusion_reparameterisation  # Optional run name; null lets W&B auto-generate one.
     save_dir: logs  # Local directory used by W&B for run files.
     log_model: false  # Whether to upload model artifacts automatically.
     save_config_file: true # Upload the active YAML config file to W&B files/artifacts.

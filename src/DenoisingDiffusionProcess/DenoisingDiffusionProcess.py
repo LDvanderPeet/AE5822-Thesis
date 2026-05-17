@@ -191,27 +191,19 @@ class DenoisingDiffusionConditionalProcess(nn.Module):
             x_t=self.sampler(x_t,t,z_t) # prediction of next state
             
         return x_t
-        
-    def p_loss(self,output,condition,return_details=False):
-        """
-            Assumes output and input are in [-1,+1] range
-        """        
-        
-        b,c,h,w=output.shape
-        device=output.device
-        
-        # loss for training
-        
-        # input is the optional condition
-        t = torch.randint(0, self.forward_process.num_timesteps, (b,), device=device).long()
-        output_noisy, noise=self.forward_process(output,t,return_noise=True)        
 
-        # reverse pass
-        model_input=torch.cat([output_noisy,condition],1).to(device)
-        noise_hat = self.model(model_input, t) 
-            
-        # apply loss
-        loss = self.loss_fn(noise, noise_hat, t)
+    def p_loss(self, output, condition, return_details=False):
+        b, c, h, w = output.shape
+        device = output.device
+
+        t = torch.randint(0, self.forward_process.num_timesteps, (b,), device=device).long()
+        output_noisy, noise = self.forward_process(output, t, return_noise=True)
+
+        model_input = torch.cat([output_noisy, condition], 1).to(device)
+        noise_hat = self.model(model_input, t)
+
+        # CHANGED: Pass output_noisy (x_t), output (x_0), and the forward_process to the loss_fn
+        loss = self.loss_fn(noise, noise_hat, t, x_t=output_noisy, x_0=output, forward_process=self.forward_process)
 
         if isinstance(loss, tuple):
             loss, details = loss
@@ -223,6 +215,6 @@ class DenoisingDiffusionConditionalProcess(nn.Module):
         return loss, details
 
     @staticmethod
-    def _mse_loss(noise, noise_hat, t):
+    def _mse_loss(noise, noise_hat, t, **kwargs):
         del t
         return F.mse_loss(noise, noise_hat)

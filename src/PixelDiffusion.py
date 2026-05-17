@@ -32,7 +32,8 @@ def _build_hybrid_diffusion_loss(
     else:
         raise ValueError(f"Unsupported hybrid base loss '{base_loss}'. Expected one of 'mse', 'mae', or 'l1'.")
 
-    def _hybrid_diffusion_loss(noise, noise_hat, t):
+    def _hybrid_diffusion_loss(noise, noise_hat, t, x_t, x_0, forward_process):
+        # Base loss (MSE/L1) is still calculated directly on the NOISE
         base_per_sample = base_loss_fn(noise_hat, noise)
 
         mask = (t <= ms_ssim_t_limit)
@@ -49,12 +50,26 @@ def _build_hybrid_diffusion_loss(
             }
             return loss, details
 
-        adv_noise_hat = noise_hat[mask]
-        adv_noise = noise[mask]
+        # Extract the masked values for advanced physics loss
+        adv_noise_hat = noise_hat[mask] # Predicted noise
+        adv_x_t = x_t[mask]             # Noisy image at timestep t
+        adv_x_0 = x_0[mask]             # Ground truth clean image
+        adv_t = t[mask]                 # Timesteps
 
-        pred_physical = inverse_norm_fn(adv_noise_hat.clamp(-1.0, 1.0))
-        target_physical = inverse_norm_fn(adv_noise)
+        # Extract cumulative alphas from the noise scheduler
+        alphas_cumprod_t = forward_process.alphas_cumprod[adv_t].view(-1, 1, 1, 1)
+        sqrt_alphas_cumprod_t = torch.sqrt(alphas_cumprod_t)
+        sqrt_one_minus_alphas_cumprod_t = torch.sqrt(1.0 - alphas_cumprod_t)
 
+        # CRITICAL MATH: Calculate the predicted clean image (x_0_hat) from the predicted noise
+        pred_x0_norm = (adv_x_t - sqrt_one_minus_alphas_cumprod_t * adv_noise_hat) / sqrt_alphas_cumprod_t
+        target_x0_norm = adv_x_0
+
+        # Un-normalize the IMAGES, not the noise!
+        pred_physical = inverse_norm_fn(pred_x0_norm.clamp(-1.0, 1.0))
+        target_physical = inverse_norm_fn(target_x0_norm.clamp(-1.0, 1.0))
+
+        # Convert to complex channels
         pred_cplx = PixelDiffusionConditional._to_complex_channels(pred_physical)
         target_cplx = PixelDiffusionConditional._to_complex_channels(target_physical)
 
@@ -109,7 +124,7 @@ def _build_hybrid_diffusion_loss(
 
     return _hybrid_diffusion_loss
 
-def _l1_diffusion_loss(noise, noise_hat, t):
+def _l1_diffusion_loss(noise, noise_hat, t, **kwargs):
     """Wrapper for L1 loss to accept the timestep 't' argument"""
     del t
     return F.l1_loss(noise_hat, noise)
