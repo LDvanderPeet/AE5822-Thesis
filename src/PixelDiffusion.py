@@ -50,26 +50,21 @@ def _build_hybrid_diffusion_loss(
             }
             return loss, details
 
-        # Extract the masked values for advanced physics loss
         adv_noise_hat = noise_hat[mask] # Predicted noise
         adv_x_t = x_t[mask]             # Noisy image at timestep t
         adv_x_0 = x_0[mask]             # Ground truth clean image
         adv_t = t[mask]                 # Timesteps
 
-        # Extract cumulative alphas from the noise scheduler
         alphas_cumprod_t = forward_process.alphas_cumprod[adv_t].view(-1, 1, 1, 1)
         sqrt_alphas_cumprod_t = torch.sqrt(alphas_cumprod_t)
         sqrt_one_minus_alphas_cumprod_t = torch.sqrt(1.0 - alphas_cumprod_t)
 
-        # CRITICAL MATH: Calculate the predicted clean image (x_0_hat) from the predicted noise
         pred_x0_norm = (adv_x_t - sqrt_one_minus_alphas_cumprod_t * adv_noise_hat) / sqrt_alphas_cumprod_t
         target_x0_norm = adv_x_0
 
-        # Un-normalize the IMAGES, not the noise!
         pred_physical = inverse_norm_fn(pred_x0_norm.clamp(-1.0, 1.0))
         target_physical = inverse_norm_fn(target_x0_norm.clamp(-1.0, 1.0))
 
-        # Convert to complex channels
         pred_cplx = PixelDiffusionConditional._to_complex_channels(pred_physical)
         target_cplx = PixelDiffusionConditional._to_complex_channels(target_physical)
 
@@ -308,20 +303,22 @@ class PixelDiffusionConditional(pl.LightningModule):
         # Only compute reconstruction metrics on first batch to save computation time
         if batch_idx == 0:
             pred_batch = self.predict_step(batch, batch_idx)
-            psnr, ssim, l1, phase_coh, phase_err = self._compute_reconstruction_metrics(pred_batch, output)
+            psnr, ssim, l1, rmse, phase_coh, phase_err = self._compute_reconstruction_metrics(pred_batch, output)
 
             self.log('val_recon_psnr', psnr, on_step=False, on_epoch=True, prog_bar=True, logger=True)
             self.log('val_recon_ssim', ssim, on_step=False, on_epoch=True, prog_bar=True, logger=True)
             self.log('val_recon_l1', l1, on_step=False, on_epoch=True, prog_bar=True, logger=True)
+            self.log('val_recon_rmse', rmse, on_step=False, on_epoch=True, prog_bar=True, logger=True)
             self.log('val_recon_phase_coherence', phase_coh, on_step=False, on_epoch=True, prog_bar=True, logger=True)
             self.log('val_recon_phase_error', phase_err, on_step=False, on_epoch=True, prog_bar=True, logger=True)
 
             ema_pred_batch = self._predict_with_ema_model(input)
             if ema_pred_batch is not None:
-                ema_psnr, ema_ssim, ema_l1, ema_phase_coh, ema_phase_err = self._compute_reconstruction_metrics(ema_pred_batch, output)
+                ema_psnr, ema_ssim, ema_l1, ema_rmse, ema_phase_coh, ema_phase_err = self._compute_reconstruction_metrics(ema_pred_batch, output)
                 self.log('val_recon_psnr_ema', ema_psnr, on_step=False, on_epoch=True, prog_bar=True, logger=True)
                 self.log('val_recon_ssim_ema', ema_ssim, on_step=False, on_epoch=True, prog_bar=True, logger=True)
                 self.log('val_recon_l1_ema', ema_l1, on_step=False, on_epoch=True, prog_bar=True, logger=True)
+                self.log('val_recon_rmse_ema', ema_rmse, on_step=False, on_epoch=True, prog_bar=True, logger=True)
                 self.log('val_recon_phase_coherence_ema', ema_phase_coh, on_step=False, on_epoch=True, prog_bar=True,
                          logger=True)
                 self.log('val_recon_phase_error_ema', ema_phase_err, on_step=False, on_epoch=True, prog_bar=True,
@@ -380,28 +377,40 @@ class PixelDiffusionConditional(pl.LightningModule):
                  on_epoch=True, prog_bar=False, logger=True)
 
     def _compute_reconstruction_metrics(self, pred_batch, target_batch):
-        """Compute batch-level reconstruction metrics from [-1, 1] tensors."""
+        """Compute batch-level reconstruction metrics from [-1, 1] tensors transformed to physical SAR scale."""
         pred = pred_batch.detach().float().clamp(-1, 1)
         target = target_batch.detach().float().clamp(-1, 1)
 
         l1 = F.l1_loss(pred, target)
+        rmse = torch.sqrt(F.mse_loss(pred, target))
 
         # Compute phase metrics on physical I/Q values (undo signed-log normalization first).
-        pred_cplx_norm = self._to_complex_channels(pred)
-        target_cplx_norm = self._to_complex_channels(target)
+        pred_phys = self._inverse_signed_log_normalize(pred)
+        target_phys = self._inverse_signed_log_normalize(target)
 
-        pred_mag_norm = torch.abs(pred_cplx_norm).cpu().numpy()
-        target_mag_norm = torch.abs(target_cplx_norm).cpu().numpy()
+        pred_cplx_phys = self._to_complex_channels(pred_phys)
+        target_cplx_phys = self._to_complex_channels(target_phys)
+
+        pred_mag_phys = torch.abs(pred_cplx_phys).cpu().numpy()
+        target_mag_phys = torch.abs(target_cplx_phys).cpu().numpy()
 
         psnr_vals, ssim_vals = [], []
-        for i in range(pred_mag_norm.shape[0]):
-            p_mag = pred_mag_norm[i]
-            t_mag = target_mag_norm[i]
+        for i in range(pred_mag_phys.shape[0]):
+            p_mag = pred_mag_phys[i]
+            t_mag = target_mag_phys[i]
 
-            psnr_vals.append(peak_signal_noise_ratio(t_mag, p_mag, data_range=1.0))
+            peak_val = t_mag.max()
+            if peak_val > 0:
+                p_mag_01 = np.clip(p_mag / peak_val, 0.0, 1.0)
+                t_mag_01 = np.clip(t_mag / peak_val, 0.0, 1.0)
+            else:
+                p_mag_01 = p_mag
+                t_mag_01 = t_mag
+
+            psnr_vals.append(peak_signal_noise_ratio(t_mag_01, p_mag_01, data_range=1.0))
             ssim_vals.append(structural_similarity(
-                t_mag,
-                p_mag,
+                t_mag_01,
+                p_mag_01,
                 data_range=1.0,
                 channel_axis=0,
                 win_size=11,
@@ -412,12 +421,6 @@ class PixelDiffusionConditional(pl.LightningModule):
         psnr = torch.tensor(psnr_vals, device=pred.device, dtype=pred.dtype).mean()
         ssim = torch.tensor(ssim_vals, device=pred.device, dtype=pred.dtype).mean()
 
-        pred_phys = self._inverse_signed_log_normalize(pred)
-        target_phys = self._inverse_signed_log_normalize(target)
-
-        pred_cplx_phys = self._to_complex_channels(pred_phys)
-        target_cplx_phys = self._to_complex_channels(target_phys)
-
         phase_coh_vals, phase_err_vals = [], []
         for i in range(pred_cplx_phys.shape[0]):
             phase_coh_vals.append(self._phase_coherence_mean(pred_cplx_phys[i], target_cplx_phys[i]))
@@ -426,7 +429,7 @@ class PixelDiffusionConditional(pl.LightningModule):
         phase_coh = torch.tensor(phase_coh_vals, device=pred.device, dtype=pred.dtype).mean()
         phase_err = torch.tensor(phase_err_vals, device=pred.device, dtype=pred.dtype).mean()
 
-        return psnr, ssim, l1, phase_coh, phase_err
+        return psnr, ssim, l1, rmse, phase_coh, phase_err
 
     def _inverse_signed_log_normalize(self, tensor: torch.Tensor) -> torch.Tensor:
         """Undo Complex Amplitude Compression back to physical I/Q scale.."""
