@@ -303,22 +303,24 @@ class PixelDiffusionConditional(pl.LightningModule):
         # Only compute reconstruction metrics on first batch to save computation time
         if batch_idx == 0:
             pred_batch = self.predict_step(batch, batch_idx)
-            psnr, ssim, l1, rmse, phase_coh, phase_err = self._compute_reconstruction_metrics(pred_batch, output)
+            psnr, ssim, l1, rmse, phase_coh, phase_err, amp_corr = self._compute_reconstruction_metrics(pred_batch, output)
 
             self.log('val_recon_psnr', psnr, on_step=False, on_epoch=True, prog_bar=True, logger=True)
             self.log('val_recon_ssim', ssim, on_step=False, on_epoch=True, prog_bar=True, logger=True)
             self.log('val_recon_l1', l1, on_step=False, on_epoch=True, prog_bar=True, logger=True)
             self.log('val_recon_rmse', rmse, on_step=False, on_epoch=True, prog_bar=True, logger=True)
+            self.log('val_recon_amp_corr', amp_corr, on_step=False, on_epoch=True, prog_bar=True, logger=True)
             self.log('val_recon_phase_coherence', phase_coh, on_step=False, on_epoch=True, prog_bar=True, logger=True)
             self.log('val_recon_phase_error', phase_err, on_step=False, on_epoch=True, prog_bar=True, logger=True)
 
             ema_pred_batch = self._predict_with_ema_model(input)
             if ema_pred_batch is not None:
-                ema_psnr, ema_ssim, ema_l1, ema_rmse, ema_phase_coh, ema_phase_err = self._compute_reconstruction_metrics(ema_pred_batch, output)
+                ema_psnr, ema_ssim, ema_l1, ema_rmse, ema_phase_coh, ema_phase_err, ema_amp_corr = self._compute_reconstruction_metrics(ema_pred_batch, output)
                 self.log('val_recon_psnr_ema', ema_psnr, on_step=False, on_epoch=True, prog_bar=True, logger=True)
                 self.log('val_recon_ssim_ema', ema_ssim, on_step=False, on_epoch=True, prog_bar=True, logger=True)
                 self.log('val_recon_l1_ema', ema_l1, on_step=False, on_epoch=True, prog_bar=True, logger=True)
                 self.log('val_recon_rmse_ema', ema_rmse, on_step=False, on_epoch=True, prog_bar=True, logger=True)
+                self.log('val_recon_amp_corr_ema', ema_amp_corr, on_step=False, on_epoch=True, prog_bar=True, logger=True)
                 self.log('val_recon_phase_coherence_ema', ema_phase_coh, on_step=False, on_epoch=True, prog_bar=True,
                          logger=True)
                 self.log('val_recon_phase_error_ema', ema_phase_err, on_step=False, on_epoch=True, prog_bar=True,
@@ -394,10 +396,18 @@ class PixelDiffusionConditional(pl.LightningModule):
         pred_mag_phys = torch.abs(pred_cplx_phys).cpu().numpy()
         target_mag_phys = torch.abs(target_cplx_phys).cpu().numpy()
 
-        psnr_vals, ssim_vals = [], []
+        psnr_vals, ssim_vals, amp_corr_vals = [], [], []
         for i in range(pred_mag_phys.shape[0]):
             p_mag = pred_mag_phys[i]
             t_mag = target_mag_phys[i]
+
+            p_flat = p_mag.flatten()
+            t_flat = t_mag.flatten()
+            corr = np.corcoeff(p_flat, t_flat)[0,1]
+
+            if np.isnan(corr):
+                corr = 0.0
+            amp_corr_vals.append(corr)
 
             peak_val = t_mag.max()
             if peak_val > 0:
@@ -428,8 +438,9 @@ class PixelDiffusionConditional(pl.LightningModule):
 
         phase_coh = torch.tensor(phase_coh_vals, device=pred.device, dtype=pred.dtype).mean()
         phase_err = torch.tensor(phase_err_vals, device=pred.device, dtype=pred.dtype).mean()
+        amp_corr = torch.tensor(amp_corr_vals, device=pred.device, dtype=pred.dtype).mean()
 
-        return psnr, ssim, l1, rmse, phase_coh, phase_err
+        return psnr, ssim, l1, rmse, phase_coh, phase_err, amp_corr
 
     def _inverse_signed_log_normalize(self, tensor: torch.Tensor) -> torch.Tensor:
         """Undo Complex Amplitude Compression back to physical I/Q scale.."""
