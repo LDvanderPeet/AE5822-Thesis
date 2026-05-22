@@ -75,11 +75,18 @@ def _build_hybrid_diffusion_loss(
         target_mag_01 = target_mag / batch_max
 
         ## Phase math
-        pred_phase = torch.angle(pred_cplx)
-        target_phase = torch.angle(target_cplx)
-        phase_diff = torch.abs(pred_phase - target_phase)
-        circular_phase_diff = torch.min(phase_diff, 2 * torch.pi - phase_diff)
-        phase_loss_subset = (circular_phase_diff * target_mag_01).flatten(1).mean(dim=1)
+        pred_I = pred_cplx.real
+        pred_Q = pred_cplx.imag
+        targ_I = target_cplx.real
+        targ_Q = target_cplx.imag
+
+        interferogram_real = (pred_I * targ_I) + (pred_Q * targ_Q)
+
+        target_mag_safe = torch.clamp(target_mag, min=1e-8)
+        pseudo_cos_phase = interferogram_real / target_mag_safe
+
+        pseudo_cplx_loss = pred_mag - pseudo_cos_phase
+        phase_loss_subset = (pseudo_cplx_loss * target_mag_01).flatten(1).mean(dim=1)
 
         ## MS-SSIM math
         pred_real_01 = ((pred_cplx.real / batch_max).clamp(-1.0, 1.0) + 1.0) / 2.0
@@ -403,7 +410,7 @@ class PixelDiffusionConditional(pl.LightningModule):
 
             p_flat = p_mag.flatten()
             t_flat = t_mag.flatten()
-            corr = np.corcoeff(p_flat, t_flat)[0,1]
+            corr = np.corrcoef(p_flat, t_flat)[0,1]
 
             if np.isnan(corr):
                 corr = 0.0
