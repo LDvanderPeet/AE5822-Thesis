@@ -72,7 +72,7 @@ class PreNorm(nn.Module):
 class ConvNextBlock(nn.Module):
     """ https://arxiv.org/abs/2201.03545 """
 
-    def __init__(self, dim, dim_out, *, time_emb_dim = None, mult = 2, norm = True):
+    def __init__(self, dim, dim_out, *, time_emb_dim = None, mult = 2, norm = True, dropout = 0.0):
         super().__init__()
         self.mlp = nn.Sequential(
             nn.GELU(),
@@ -85,6 +85,7 @@ class ConvNextBlock(nn.Module):
             LayerNorm(dim) if norm else nn.Identity(),
             nn.Conv2d(dim, dim_out * mult, 3, padding = 1),
             nn.GELU(),
+            nn.Dropout(dropout),
             nn.Conv2d(dim_out * mult, dim_out, 3, padding = 1)
         )
 
@@ -102,13 +103,14 @@ class ConvNextBlock(nn.Module):
         return h + self.res_conv(x)
 
 class LinearAttention(nn.Module):
-    def __init__(self, dim, heads = 4, dim_head = 32):
+    def __init__(self, dim, heads = 4, dim_head = 32, dropout = 0.0):
         super().__init__()
         self.scale = dim_head ** -0.5
         self.heads = heads
         hidden_dim = dim_head * heads
         self.to_qkv = nn.Conv2d(dim, hidden_dim * 3, 1, bias = False)
         self.to_out = nn.Conv2d(hidden_dim, dim, 1)
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
         b, c, h, w = x.shape
@@ -121,7 +123,7 @@ class LinearAttention(nn.Module):
 
         out = torch.einsum('b h d e, b h d n -> b h e n', context, q)
         out = rearrange(out, 'b h c (x y) -> b (h c) x y', h = self.heads, x = h, y = w)
-        return self.to_out(out)
+        return self.dropout(self.to_out(out))
 
 # Main Model
 
@@ -134,7 +136,8 @@ class UnetConvNextBlock(nn.Module):
         channels = 3,
         with_time_emb = True,
         output_mean_scale = False,
-        residual = False
+        residual = False,
+        dropout = 0.0,
     ):
         super().__init__()
         self.channels = channels
@@ -165,30 +168,30 @@ class UnetConvNextBlock(nn.Module):
             is_last = ind >= (num_resolutions - 1)
 
             self.downs.append(nn.ModuleList([
-                ConvNextBlock(dim_in, dim_out, time_emb_dim = time_dim, norm = ind != 0),
-                ConvNextBlock(dim_out, dim_out, time_emb_dim = time_dim),
-                Residual(PreNorm(dim_out, LinearAttention(dim_out))),
+                ConvNextBlock(dim_in, dim_out, time_emb_dim = time_dim, norm = ind != 0, dropout=dropout),
+                ConvNextBlock(dim_out, dim_out, time_emb_dim = time_dim, dropout=dropout),
+                Residual(PreNorm(dim_out, LinearAttention(dim_out, dropout=dropout))),
                 Downsample(dim_out) if not is_last else nn.Identity()
             ]))
 
         mid_dim = dims[-1]
-        self.mid_block1 = ConvNextBlock(mid_dim, mid_dim, time_emb_dim = time_dim)
-        self.mid_attn = Residual(PreNorm(mid_dim, LinearAttention(mid_dim)))
-        self.mid_block2 = ConvNextBlock(mid_dim, mid_dim, time_emb_dim = time_dim)
+        self.mid_block1 = ConvNextBlock(mid_dim, mid_dim, time_emb_dim = time_dim, dropout=dropout)
+        self.mid_attn = Residual(PreNorm(mid_dim, LinearAttention(mid_dim, dropout=dropout)))
+        self.mid_block2 = ConvNextBlock(mid_dim, mid_dim, time_emb_dim = time_dim, dropout=dropout)
 
         for ind, (dim_in, dim_out) in enumerate(reversed(in_out[1:])):
             is_last = ind >= (num_resolutions - 1)
 
             self.ups.append(nn.ModuleList([
-                ConvNextBlock(dim_out * 2, dim_in, time_emb_dim = time_dim),
-                ConvNextBlock(dim_in, dim_in, time_emb_dim = time_dim),
-                Residual(PreNorm(dim_in, LinearAttention(dim_in))),
+                ConvNextBlock(dim_out * 2, dim_in, time_emb_dim = time_dim, dropout=dropout),
+                ConvNextBlock(dim_in, dim_in, time_emb_dim = time_dim, dropout=dropout),
+                Residual(PreNorm(dim_in, LinearAttention(dim_in, dropout=dropout))),
                 Upsample(dim_in) if not is_last else nn.Identity()
             ]))
 
         out_dim = default(out_dim, channels)
         self.final_conv = nn.Sequential(
-            ConvNextBlock(dim, dim),
+            ConvNextBlock(dim, dim, dropout=dropout),
             nn.Conv2d(dim, out_dim, 1),
             #nn.Tanh() # ADDED
         )

@@ -97,6 +97,7 @@ def main() -> None:
             model_dim_mults=tuple(unet_cfg.get("dim_mults", [1, 2, 4, 8])),
             model_channels=unet_cfg.get("channels"),
             model_out_dim=unet_cfg.get("out_dim"),
+            dropout=unet_cfg.get("dropout", 0.0),
             ema_enabled=ema_cfg.get("enabled", False),
             ema_beta=ema_cfg.get("beta", 0.9999),
             ema_update_every=ema_cfg.get("update_every", 1),

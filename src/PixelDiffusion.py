@@ -156,6 +156,7 @@ class PixelDiffusionConditional(pl.LightningModule):
                  model_dim_mults=(1,2,4,8),
                  model_channels=None,
                  model_out_dim=None,
+                 dropout=0.1,
                  lr=1e-3,
                  lr_scheduler_factor=0.5,
                  lr_scheduler_patience=10,
@@ -215,7 +216,8 @@ class PixelDiffusionConditional(pl.LightningModule):
                                                         model_dim=model_dim,
                                                         model_dim_mults=model_dim_mults,
                                                         model_channels=model_channels,
-                                                        model_out_dim=model_out_dim)
+                                                        model_out_dim=model_out_dim,
+                                                        dropout=dropout)
         self.ema = (
             EMAWrapper(
                 model=self.model,
@@ -290,7 +292,7 @@ class PixelDiffusionConditional(pl.LightningModule):
         del outputs, batch, batch_idx
         if self.ema is None:
             return
-        self.ema.update(self.model, commit=False)
+        self.ema.update(self.model, self.global_step)
 
     def validation_step(self, batch, batch_idx):     
         """Lightning validation hook.

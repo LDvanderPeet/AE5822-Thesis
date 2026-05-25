@@ -24,7 +24,8 @@ class DenoisingDiffusionProcess(nn.Module):
                  model_dim=64,
                  model_dim_mults=(1,2,4,8),
                  model_channels=None,
-                 model_out_dim=None
+                 model_out_dim=None,
+                 dropout=0.1,
                 ):
         super().__init__()
         
@@ -45,7 +46,8 @@ class DenoisingDiffusionProcess(nn.Module):
                                      dim_mults=model_dim_mults,
                                      channels=model_channels,
                                      out_dim=model_out_dim,
-                                     with_time_emb=True)
+                                     with_time_emb=True,
+                                     dropout=dropout,)
                
         
         # defaults to a DDPM sampler if None is provided
@@ -126,7 +128,8 @@ class DenoisingDiffusionConditionalProcess(nn.Module):
                  model_dim=64,
                  model_dim_mults=(1,2,4,8),
                  model_channels=None,
-                 model_out_dim=None
+                 model_out_dim=None,
+                 dropout=0.1,
                 ):
         super().__init__()
         
@@ -150,7 +153,8 @@ class DenoisingDiffusionConditionalProcess(nn.Module):
                                      dim_mults=model_dim_mults,
                                      channels=model_channels,
                                      out_dim=model_out_dim,
-                                     with_time_emb=True)
+                                     with_time_emb=True,
+                                     dropout=dropout)
         
         # defaults to a DDPM sampler if None is provided
         self.sampler=DDPM_Sampler(num_timesteps=self.num_timesteps) if sampler is None else sampler
