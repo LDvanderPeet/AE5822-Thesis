@@ -10,8 +10,23 @@ import torch
 from joblib import Parallel, delayed
 from safetensors.torch import save_file
 
-SUFFIXES = ["", "_SA1", "_SA2", "_SA3"]
+SUFFIXES = [""]
 POLS = ["VV", "VH"]
+
+
+def apply_azimuth_lowpass_numpy(complex_patch: np.ndarray, ratio: float) -> np.ndarray:
+    """Applies a continuous top-hat filter in the Doppler domain."""
+    spectrum = np.fft.fftshift(np.fft.fft(complex_patch, axis=-1), axes=-1)
+
+    keep_bins = int(spectrum.shape[-1] * ratio)
+    start_idx = (spectrum.shape[-1] - keep_bins) // 2
+
+    mask = np.zeros_like(spectrum)
+    mask[..., start_idx: start_idx + keep_bins] = 1.0
+
+    truncated = spectrum * mask
+    low_res = np.fft.ifft(np.fft.ifftshift(truncated, axes=-1), axis=-1)
+    return low_res
 
 
 def iter_h5_files(root_dir, recursive=True):
@@ -58,14 +73,12 @@ def read_complex_block(dataset_pairs, h0, w0, bh, bw):
         q = ds_q[h0:h0 + bh, w0:w0 + bw].astype(np.float32, copy=False)
         chans.append(i)
         chans.append(q)
-        # [I_vv, Q_vv, I_vh, Q_vh, I_vv_sa1, Q_vv_sa1...]
+    # Returns 4 channels: [I_vv, Q_vv, I_vh, Q_vh]
     return np.stack(chans, axis=0).astype(np.float32, copy=False)
 
 
 def process_one_h5(h5_path, in_dir, out_dir, patch_size, stride, group, zero_thr, ratio_thr, block_size):
     tile_name = os.path.splitext(os.path.basename(h5_path))[0]
-
-    # Product name = parent folder relative to input root
     rel_dir = os.path.relpath(os.path.dirname(h5_path), in_dir)
     product_name = rel_dir.split(os.sep)[0]
 
@@ -87,7 +100,6 @@ def process_one_h5(h5_path, in_dir, out_dir, patch_size, stride, group, zero_thr
                 bh = min(block_size, H - bh0)
                 bw = min(block_size, W - bw0)
 
-                # Keep only full patches inside the current block
                 bh = (bh // patch_size) * patch_size
                 bw = (bw // patch_size) * patch_size
 
@@ -100,9 +112,9 @@ def process_one_h5(h5_path, in_dir, out_dir, patch_size, stride, group, zero_thr
                     for w1 in range(0, bw - patch_size + 1, stride):
                         n_total += 1
 
+                        # x is shape (4, patch_size, patch_size) -> [I_vv, Q_vv, I_vh, Q_vh]
                         x = block[:, h1:h1 + patch_size, w1:w1 + patch_size]
 
-                        # Filter based on zeros in channel 0 (VV original)
                         if ratio_thr is not None:
                             intensity_vv = x[0] ** 2 + x[1] ** 2
                             no_data_ratio = float((intensity_vv <= zero_thr).sum() / (patch_size * patch_size))
@@ -110,16 +122,35 @@ def process_one_h5(h5_path, in_dir, out_dir, patch_size, stride, group, zero_thr
                                 n_skipped += 1
                                 continue
 
+                        # Create Complex patches for FFT processing
+                        c_vv = x[0] + 1j * x[1]
+                        c_vh = x[2] + 1j * x[3]
+
+                        # Build the 20-channel array (5 blocks of 4 channels)
+                        out_channels = [x[0], x[1], x[2], x[3]] # Logical Index 0: Full Aperture
+
+                        # The Walk-Back Downsampling Limits
+                        for ratio in [0.875, 0.750, 0.625, 0.500]:
+                            low_vv = apply_azimuth_lowpass_numpy(c_vv, ratio)
+                            low_vh = apply_azimuth_lowpass_numpy(c_vh, ratio)
+                            out_channels.extend([
+                                low_vv.real.astype(np.float32),
+                                low_vv.imag.astype(np.float32),
+                                low_vh.real.astype(np.float32),
+                                low_vh.imag.astype(np.float32)
+                            ])
+
+                        # Stack to (20, 256, 256)
+                        x_20 = np.stack(out_channels, axis=0)
+
                         out_h = bh0 + h1
                         out_w = bw0 + w1
-
                         out_path = os.path.join(
                             product_out_dir,
                             f"{tile_name}__{out_h}_{out_w}.safetensors"
                         )
 
-                        # .copy() avoids subtle issues with non-contiguous views
-                        x_t = torch.from_numpy(x.copy())
+                        x_t = torch.from_numpy(x_20.copy())
                         save_file({"x": x_t}, out_path)
                         n_saved += 1
 
@@ -138,10 +169,8 @@ def _auto_workers():
             n = 0
     else:
         n = 0
-
     if n <= 0:
         n = os.cpu_count() or 1
-
     return max(1, n)
 
 
@@ -149,61 +178,36 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--in_dir", required=True, help="Root directory containing .h5 files")
     ap.add_argument("--out_dir", required=True, help="Output directory for .safetensors patches")
-    ap.add_argument("--patch_size", type=int, default=128, help="Patch size, default: 128")
-    ap.add_argument("--stride", type=int, default=None, help="Overlap stride, default: None")
-    ap.add_argument(
-        "--block_size",
-        type=int,
-        default=960,
-        help="Block size used for HDF5 reads. Recommended: multiple of patch_size, default: 960",
-    )
+
+    # Defaults updated for physical ASR constraints
+    ap.add_argument("--patch_size", type=int, default=256, help="Patch size, default: 256")
+    ap.add_argument("--stride", type=int, default=256, help="Overlap stride (256 = Zero Overlap)")
+
+    ap.add_argument("--block_size", type=int, default=1024, help="Block size. Multiple of 256.")
     ap.add_argument("--group", default="bands", help="H5 group name, default: bands")
     ap.add_argument("--no_recursive", action="store_true", help="Do not search recursively for .h5")
-    ap.add_argument(
-        "--ratio_thr",
-        type=float,
-        default=0.5,
-        help="Skip patch if zero ratio > ratio_thr in channel 0",
-    )
-    ap.add_argument(
-        "--zero_thr",
-        type=float,
-        default=0.0,
-        help="Consider values <= zero_thr as zero",
-    )
+    ap.add_argument("--ratio_thr", type=float, default=0.5, help="Skip patch if zero ratio > ratio_thr")
+    ap.add_argument("--zero_thr", type=float, default=0.0, help="Consider values <= zero_thr as zero")
     args = ap.parse_args()
 
     if args.stride is None:
         args.stride = args.patch_size
 
-    if args.block_size < args.patch_size:
-        raise ValueError("block_size must be >= patch_size")
-
-    if args.block_size % args.patch_size != 0:
-        raise ValueError("block_size should be a multiple of patch_size for best performance")
+    if args.block_size < args.patch_size or args.block_size % args.patch_size != 0:
+        raise ValueError("Invalid block_size. Must be multiple of patch_size (e.g., 1024).")
 
     os.makedirs(args.out_dir, exist_ok=True)
-
     h5_files = iter_h5_files(args.in_dir, recursive=(not args.no_recursive))
     print(f"Found {len(h5_files)} .h5 files under: {args.in_dir}")
-    if not h5_files:
-        return
+    if not h5_files: return
 
     n_jobs = _auto_workers()
     print(f"Using n_jobs={n_jobs}")
-    print(f"patch_size={args.patch_size}, block_size={args.block_size}")
 
     results = Parallel(n_jobs=n_jobs, prefer="processes")(
         delayed(process_one_h5)(
-            p,
-            args.in_dir,
-            args.out_dir,
-            args.patch_size,
-            args.stride,
-            args.group,
-            args.zero_thr,
-            args.ratio_thr,
-            args.block_size,
+            p, args.in_dir, args.out_dir, args.patch_size, args.stride,
+            args.group, args.zero_thr, args.ratio_thr, args.block_size,
         )
         for p in h5_files
     )
@@ -211,18 +215,8 @@ def main():
     ok = [r for r in results if r[4] is None]
     bad = [r for r in results if r[4] is not None]
 
-    total_saved = sum(r[1] for r in ok)
-    total_total = sum(r[2] for r in ok)
-    total_skipped = sum(r[3] for r in ok)
-
     print("\nSummary")
-    print(f"  OK files:   {len(ok)}")
-    print(f"  Bad files:  {len(bad)}")
-    print(f"  Patches total candidates: {total_total}")
-    print(f"  Patches saved:            {total_saved}")
-    print(f"  Patches skipped:          {total_skipped}")
-    print(f"  Output dir: {args.out_dir}")
-
+    print(f"  Patches saved:            {sum(r[1] for r in ok)}")
     if bad:
         print("\nErrors (first 20):")
         for p, *_rest, err in bad[:20]:
