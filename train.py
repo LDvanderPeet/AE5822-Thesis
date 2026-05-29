@@ -53,7 +53,7 @@ def main() -> None:
     wandb_cfg = config.get("logging", {}).get("wandb", {})
     raw_run_name = wandb_cfg.get("name") or "run"
     run_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", raw_run_name).strip("._-") or "run"
-    timestamp = datetime.now().strftime("%Y%d%m-%H%M")
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M")
     run_folder_name = f"{timestamp}-{run_name}"
     wandb_base_dir = Path(wandb_cfg.get("save_dir", "logs")).expanduser()
     wandb_local_dir = wandb_base_dir / run_folder_name
@@ -107,6 +107,12 @@ def main() -> None:
             wandb_config_artifact_name=wandb_cfg.get("config_artifact_name"),
         )
 
+    if args.resume_from_ckpt:
+        print(f"\n>>> Overriding state lock: Loading weights only from {args.resume_from_ckpt}")
+        checkpoint = torch.load(args.resume_from_ckpt, map_location="cpu")
+        state_dict = checkpoint["state_dict"]
+        model.load_state_dict(state_dict)
+
     visualizer_callback = WandBPlottingCallback(
         target_label="FA",
         phase_hist_max_batches=model_cfg.get("phase_hist_max_batches", 8)
@@ -155,7 +161,7 @@ def main() -> None:
         callbacks=[lr_monitor, checkpoint_callback, visualizer_callback],
     )
 
-    trainer.fit(model, datamodule=datamodule, ckpt_path=args.resume_from_ckpt)
+    trainer.fit(model, datamodule=datamodule)
 
 
 if __name__ == "__main__":
