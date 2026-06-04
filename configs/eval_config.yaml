@@ -1,0 +1,52 @@
+seed: 27
+
+data:
+  root_dir: "/shared/home/lvanderpeet/AE5822-Thesis/dataset/safetensors_test"
+  batch_size: 1  # Can be adjusted based on GPU memory
+  num_workers: 0
+  subaperture_config:
+    input_indices: [2]  # Your 85% bandwidth track
+    output_indices: [0]
+    active_polarizations: ["VV"]
+  split:
+    train: 0.0
+    valid: 0.0
+    test: 1.0  # Force the loader to consume 100% of the files inside the test folder
+
+model:
+  type: diffusion # diffusion (default) or DC2SCN baseline
+  in_channels: 2  # Channels in the conditional input x.
+  out_channels: 2  # Channels in the reconstruction target y.
+  num_timesteps: 1000  # Number of diffusion denoising steps.
+  schedule: cosine  # Beta schedule variant for the forward process.
+  loss_fn: hybrid # 'mse' (L2), 'mae' (L1), or 'hybrid' (MS-SSIM for low t and L1/L2 otherwise).
+  hybrid_base_loss: mse # Only used when loss_fn='hybrid': choose fallback loss at high t ('mse' or 'mae').
+  hybrid_ms_ssim_weight: 1.0 # Factor to scale the MS-SSIM loss
+  hybrid_phase_weight: 2.0 # Only used when loss_fn='hybrid': scales the circular phase term inside the advanced loss.
+  hybrid_ms_ssim_t_limit: 150 # Only used when loss_fn='hybrid': apply MS-SSIM for timesteps t <= this limit.
+  noise_offset: 0.0 # optional low-frequency offset term to training noise
+  ema:
+    enabled: true  # Keep an exponential moving average copy of training weights.
+    beta: 0.9999  # EMA decay. Closer to 1.0 means smoother but slower-reacting EMA weights.
+    update_every: 1  # Apply EMA update every N train batches.
+    update_after_step: 10000  # Start EMA smoothing after this many updates; before that copy weights directly.
+  dc2scn:
+    width: 64
+    num_blocks: 6
+    growth_rate: 32
+  unet:
+    dim: 64  # Base UNet width. Previous setting was 64; 48 reduces parameter count to about half (30M instead of 55M).
+    dim_mults: [1, 2, 4, 8]  # Width multipliers per UNet level.
+    channels: 4  # Input channels to UNet; for conditional concat this is usually in_channels + out_channels.
+    out_dim: 2  # UNet output channels; should match model.out_channels.
+    dropout: 0.1 # Fraction of neurons turned off per epoch to prevent overfitting.
+
+evaluation:
+  checkpoint_path: "/shared/home/lvanderpeet/AE5822-Thesis/checkpoints/20260528-1325-diffusion_ASR_refinement/refine-010-0.8559.ckpt"
+  save_dir: "evaluation_results/75pct_sanity"
+  tests:
+    generate_scenes: True
+    point_target_analysis: False
+    kde_distance: False
+    phase_coherence: False
+    enl_comparison: False

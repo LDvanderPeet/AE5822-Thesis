@@ -6,7 +6,7 @@ data:
   image_width: 256
   global_max: 300
   subaperture_config:
-   input_indices: [2]
+   input_indices: [1]
    output_indices: [0]
    active_polarizations: ["VV"] # retrieves only these polarizations ("vv", "vh", "hv", "hh")
   loader:
@@ -79,7 +79,7 @@ trainer:
 logging:
   wandb:
     project: dif_img_rec  # Weights & Biases project name.
-    name: diffusion_ASR_refinement  # Optional run name; null lets W&B auto-generate one.
+    name: diffusion_ASR_85pct_refinement  # Optional run name; null lets W&B auto-generate one.
     save_dir: logs  # Local directory used by W&B for run files.
     log_model: false  # Whether to upload model artifacts automatically.
     save_config_file: true # Upload the active YAML config file to W&B files/artifacts.
@@ -90,7 +90,8 @@ evaluation:
   checkpoint_path: "/shared/home/lvanderpeet/AE5822-Thesis/checkpoints/Complex-090-0.1085.ckpt"
   save_dir: "evaluation_results"
   tests:
+    generate_scenes: True
     point_target_analysis: False
-    kde_distance: True
-    phase_coherence: True
-    enl_comparison: True
+    kde_distance: False
+    phase_coherence: False
+    enl_comparison: False
