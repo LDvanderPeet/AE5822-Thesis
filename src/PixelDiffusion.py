@@ -11,7 +11,6 @@ from .DenoisingDiffusionProcess import *
 from .EMA import EMAWrapper
 
 
-
 def _build_hybrid_diffusion_loss(
         inverse_norm_fn,
         base_loss='mse',
@@ -19,16 +18,18 @@ def _build_hybrid_diffusion_loss(
         ms_ssim_weight=15.0,
         phase_weight=0.5,
 ):
-    """Create timestep-aware hybrid loss for diffusion training.
+    """
+    Create timestep-aware hybrid loss for diffusion training.
 
     For early timesteps (t <= ms_ssim_t_limit), optimize 1 - MS-SSIM + Circular Phase loss.
-    For later timesteps, optimize the configured base loss (L1/L2)."""
+    For later timesteps, optimize the configured base loss (L1/L2).
+    """
 
     base_loss_name = base_loss.lower()
     if base_loss_name == 'mse':
-        base_loss_fn = lambda pred, target: F.mse_loss(pred, target, reduction='none').flatten(1).mean(dim=1)
+        base_loss_fn = lambda rec, ref: F.mse_loss(rec, ref, reduction='none').flatten(1).mean(dim=1)
     elif base_loss_name in {'mae', 'l1'}:
-        base_loss_fn = lambda pred, target: F.l1_loss(pred, target, reduction='none').flatten(1).mean(dim=1)
+        base_loss_fn = lambda rec, ref: F.l1_loss(rec, ref, reduction='none').flatten(1).mean(dim=1)
     else:
         raise ValueError(f"Unsupported hybrid base loss '{base_loss}'. Expected one of 'mse', 'mae', or 'l1'.")
 
@@ -50,61 +51,78 @@ def _build_hybrid_diffusion_loss(
             }
             return loss, details
 
-        adv_noise_hat = noise_hat[mask] # Predicted noise
-        adv_x_t = x_t[mask]             # Noisy image at timestep t
-        adv_x_0 = x_0[mask]             # Ground truth clean image
-        adv_t = t[mask]                 # Timesteps
+        adv_noise_hat = noise_hat[mask]  # Predicted noise
+        adv_x_t = x_t[mask]  # Noisy image at timestep t
+        adv_x_0 = x_0[mask]  # Ground truth clean image
+        adv_t = t[mask]  # Timesteps
 
         alphas_cumprod_t = forward_process.alphas_cumprod[adv_t].view(-1, 1, 1, 1)
         sqrt_alphas_cumprod_t = torch.sqrt(alphas_cumprod_t)
         sqrt_one_minus_alphas_cumprod_t = torch.sqrt(1.0 - alphas_cumprod_t)
 
-        pred_x0_norm = (adv_x_t - sqrt_one_minus_alphas_cumprod_t * adv_noise_hat) / sqrt_alphas_cumprod_t
-        target_x0_norm = adv_x_0
+        rec_x0_norm = (adv_x_t - sqrt_one_minus_alphas_cumprod_t * adv_noise_hat) / sqrt_alphas_cumprod_t
+        ref_x0_norm = adv_x_0
 
-        pred_physical = inverse_norm_fn(pred_x0_norm.clamp(-1.0, 1.0))
-        target_physical = inverse_norm_fn(target_x0_norm.clamp(-1.0, 1.0))
-
-        pred_cplx = PixelDiffusionConditional._to_complex_channels(pred_physical)
-        target_cplx = PixelDiffusionConditional._to_complex_channels(target_physical)
-
-        pred_mag = torch.abs(pred_cplx)
-        target_mag = torch.abs(target_cplx)
-
-        batch_max = target_mag.amax(dim=(1, 2, 3), keepdim=True).clamp(min=1e-8)
-        target_mag_01 = target_mag / batch_max
-
-        ## Phase math
-        pred_I = pred_cplx.real
-        pred_Q = pred_cplx.imag
-        targ_I = target_cplx.real
-        targ_Q = target_cplx.imag
-
-        interferogram_real = (pred_I * targ_I) + (pred_Q * targ_Q)
-
-        target_mag_safe = torch.clamp(target_mag, min=1e-8)
-        pseudo_cos_phase = interferogram_real / target_mag_safe
-
-        pseudo_cplx_loss = pred_mag - pseudo_cos_phase
-        phase_loss_subset = (pseudo_cplx_loss * target_mag_01).flatten(1).mean(dim=1)
-
-        ## MS-SSIM math
-        pred_real_01 = ((pred_cplx.real / batch_max).clamp(-1.0, 1.0) + 1.0) / 2.0
-        target_real_01 = ((target_cplx.real / batch_max).clamp(-1.0, 1.0) + 1.0) / 2.0
-        pred_imag_01 = ((pred_cplx.imag / batch_max).clamp(-1.0, 1.0) + 1.0) / 2.0
-        target_imag_01 = ((target_cplx.imag / batch_max).clamp(-1.0, 1.0) + 1.0) / 2.0
+        rec_physical = inverse_norm_fn(rec_x0_norm.clamp(-1.0, 1.0))
+        ref_physical = inverse_norm_fn(ref_x0_norm.clamp(-1.0, 1.0))
 
         custom_betas = (0.0517, 0.3295, 0.3462, 0.2726)
 
-        ms_ssim_real = multiscale_structural_similarity_index_measure(
-            pred_real_01, target_real_01, data_range=1.0, reduction='none', betas=custom_betas
-        )
-        ms_ssim_imag = multiscale_structural_similarity_index_measure(
-            pred_imag_01, target_imag_01, data_range=1.0, reduction='none', betas=custom_betas
-        )
+        ## Amplitude only
+        if rec_physical.shape[1] == 1:
+            rec_mag = rec_physical
+            ref_mag = ref_physical
+            batch_max = ref_mag.amax(dim=(1, 2, 3), keepdim=True).clamp(min=1e-8)
 
-        ms_ssim_subset = (ms_ssim_real + ms_ssim_imag) / 2.0
-        ms_ssim_loss_subset = 1.0 - ms_ssim_subset
+            phase_loss_subset = torch.zeros_like(base_per_sample[mask])
+
+            rec_real_01 = (rec_mag / batch_max).clamp(0.0, 1.0)
+            ref_real_01 = (ref_mag / batch_max).clamp(0.0, 1.0)
+
+            ms_ssim_subset = multiscale_structural_similarity_index_measure(
+                rec_real_01, ref_real_01, data_range=1.0, reduction='none', betas=custom_betas
+            )
+            ms_ssim_loss_subset = 1.0 - ms_ssim_subset
+        ## Complex (I and Q)
+        else:
+            rec_cplx = PixelDiffusionConditional._to_complex_channels(rec_physical)
+            ref_cplx = PixelDiffusionConditional._to_complex_channels(ref_physical)
+
+            rec_mag = torch.abs(rec_cplx)
+            ref_mag = torch.abs(ref_cplx)
+
+            batch_max = ref_mag.amax(dim=(1, 2, 3), keepdim=True).clamp(min=1e-8)
+            ref_mag_01 = ref_mag / batch_max
+
+            ## Phase math
+            rec_I = rec_cplx.real
+            rec_Q = rec_cplx.imag
+            ref_I = ref_cplx.real
+            ref_Q = ref_cplx.imag
+
+            interferogram_real = (rec_I * ref_I) + (rec_Q * ref_Q)
+
+            ref_mag_safe = torch.clamp(ref_mag, min=1e-8)
+            pseudo_cos_phase = interferogram_real / ref_mag_safe
+
+            pseudo_cplx_loss = rec_mag - pseudo_cos_phase
+            phase_loss_subset = (pseudo_cplx_loss * ref_mag_01).flatten(1).mean(dim=1)
+
+            ## MS-SSIM math
+            rec_real_01 = ((rec_cplx.real / batch_max).clamp(-1.0, 1.0) + 1.0) / 2.0
+            ref_real_01 = ((ref_cplx.real / batch_max).clamp(-1.0, 1.0) + 1.0) / 2.0
+            rec_imag_01 = ((rec_cplx.imag / batch_max).clamp(-1.0, 1.0) + 1.0) / 2.0
+            ref_imag_01 = ((ref_cplx.imag / batch_max).clamp(-1.0, 1.0) + 1.0) / 2.0
+
+            ms_ssim_real = multiscale_structural_similarity_index_measure(
+                rec_real_01, ref_real_01, data_range=1.0, reduction='none', betas=custom_betas
+            )
+            ms_ssim_imag = multiscale_structural_similarity_index_measure(
+                rec_imag_01, ref_imag_01, data_range=1.0, reduction='none', betas=custom_betas
+            )
+
+            ms_ssim_subset = (ms_ssim_real + ms_ssim_imag) / 2.0
+            ms_ssim_loss_subset = 1.0 - ms_ssim_subset
 
         advanced_penalty_subset = (ms_ssim_weight * ms_ssim_loss_subset) + (phase_weight * phase_loss_subset)
 
@@ -126,6 +144,7 @@ def _build_hybrid_diffusion_loss(
 
     return _hybrid_diffusion_loss
 
+
 def _l1_diffusion_loss(noise, noise_hat, t, **kwargs):
     """Wrapper for L1 loss to accept the timestep 't' argument"""
     del t
@@ -139,6 +158,7 @@ class PixelDiffusionConditional(pl.LightningModule):
     - `x`: condition tensor
     - `y`: target tensor to reconstruct/generate
     """
+
     def __init__(self,
                  condition_channels=3,
                  generated_channels=3,
@@ -153,7 +173,7 @@ class PixelDiffusionConditional(pl.LightningModule):
                  hybrid_ms_ssim_weight=15.0,
                  hybrid_phase_weight=0.5,
                  model_dim=64,
-                 model_dim_mults=(1,2,4,8),
+                 model_dim_mults=(1, 2, 4, 8),
                  model_channels=None,
                  model_out_dim=None,
                  dropout=0.1,
@@ -171,8 +191,8 @@ class PixelDiffusionConditional(pl.LightningModule):
 
         super().__init__()
         self.lr = lr
-        self.lr_scheduler_factor=lr_scheduler_factor
-        self.lr_scheduler_patience=lr_scheduler_patience
+        self.lr_scheduler_factor = lr_scheduler_factor
+        self.lr_scheduler_patience = lr_scheduler_patience
 
         self.ema_enabled = ema_enabled
         self.ema_beta = float(ema_beta)
@@ -207,17 +227,17 @@ class PixelDiffusionConditional(pl.LightningModule):
         else:
             raise ValueError(f"Unsupported model.loss_fn {self.loss_name}. Expected one of 'mse', 'mae', or 'hybrid'.")
 
-        self.model=DenoisingDiffusionConditionalProcess(generated_channels=generated_channels,
-                                                        condition_channels=condition_channels,
-                                                        loss_fn=resolved_loss_fn,
-                                                        schedule=schedule,
-                                                        noise_offset=noise_offset,
-                                                        num_timesteps=num_timesteps,
-                                                        model_dim=model_dim,
-                                                        model_dim_mults=model_dim_mults,
-                                                        model_channels=model_channels,
-                                                        model_out_dim=model_out_dim,
-                                                        dropout=dropout)
+        self.model = DenoisingDiffusionConditionalProcess(generated_channels=generated_channels,
+                                                          condition_channels=condition_channels,
+                                                          loss_fn=resolved_loss_fn,
+                                                          schedule=schedule,
+                                                          noise_offset=noise_offset,
+                                                          num_timesteps=num_timesteps,
+                                                          model_dim=model_dim,
+                                                          model_dim_mults=model_dim_mults,
+                                                          model_channels=model_channels,
+                                                          model_out_dim=model_out_dim,
+                                                          dropout=dropout)
         self.ema = (
             EMAWrapper(
                 model=self.model,
@@ -271,11 +291,10 @@ class PixelDiffusionConditional(pl.LightningModule):
     def input_T(self, input):
         return input.clamp(-1, 1)
 
-
     def output_T(self, input):
         return input.clamp(-1, 1)
 
-    def training_step(self, batch, batch_idx):   
+    def training_step(self, batch, batch_idx):
         """Lightning train hook for conditional diffusion."""
         input, output = batch
         if self.loss_name == 'hybrid':
@@ -284,7 +303,7 @@ class PixelDiffusionConditional(pl.LightningModule):
         else:
             loss = self.model.p_loss(self.input_T(output), self.input_T(input))
 
-        self.log('train_loss',loss,on_step=True,on_epoch=True,prog_bar=True,logger=True)
+        self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
         return loss
 
     def on_train_batch_end(self, outputs, batch, batch_idx):
@@ -294,7 +313,7 @@ class PixelDiffusionConditional(pl.LightningModule):
             return
         self.ema.update(self.model, self.global_step)
 
-    def validation_step(self, batch, batch_idx):     
+    def validation_step(self, batch, batch_idx):
         """Lightning validation hook.
 
         Logs `val_loss` for scheduler control and, on the first validation batch,
@@ -306,13 +325,14 @@ class PixelDiffusionConditional(pl.LightningModule):
             self._log_hybrid_loss_terms(loss_details, stage='val')
         else:
             loss = self.model.p_loss(self.input_T(output), self.input_T(input))
-        
+
         self.log('val_loss', loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
 
         # Only compute reconstruction metrics on first batch to save computation time
         if batch_idx == 0:
-            pred_batch = self.predict_step(batch, batch_idx)
-            psnr, ssim, l1, rmse, phase_coh, phase_err, amp_corr = self._compute_reconstruction_metrics(pred_batch, output)
+            rec_batch = self.predict_step(batch, batch_idx)
+            psnr, ssim, l1, rmse, phase_coh, phase_err, amp_corr = self._compute_reconstruction_metrics(rec_batch,
+                                                                                                        output)
 
             self.log('val_recon_psnr', psnr, on_step=False, on_epoch=True, prog_bar=True, logger=True)
             self.log('val_recon_ssim', ssim, on_step=False, on_epoch=True, prog_bar=True, logger=True)
@@ -322,14 +342,16 @@ class PixelDiffusionConditional(pl.LightningModule):
             self.log('val_recon_phase_coherence', phase_coh, on_step=False, on_epoch=True, prog_bar=True, logger=True)
             self.log('val_recon_phase_error', phase_err, on_step=False, on_epoch=True, prog_bar=True, logger=True)
 
-            ema_pred_batch = self._predict_with_ema_model(input)
-            if ema_pred_batch is not None:
-                ema_psnr, ema_ssim, ema_l1, ema_rmse, ema_phase_coh, ema_phase_err, ema_amp_corr = self._compute_reconstruction_metrics(ema_pred_batch, output)
+            ema_rec_batch = self._predict_with_ema_model(input)
+            if ema_rec_batch is not None:
+                ema_psnr, ema_ssim, ema_l1, ema_rmse, ema_phase_coh, ema_phase_err, ema_amp_corr = self._compute_reconstruction_metrics(
+                    ema_rec_batch, output)
                 self.log('val_recon_psnr_ema', ema_psnr, on_step=False, on_epoch=True, prog_bar=True, logger=True)
                 self.log('val_recon_ssim_ema', ema_ssim, on_step=False, on_epoch=True, prog_bar=True, logger=True)
                 self.log('val_recon_l1_ema', ema_l1, on_step=False, on_epoch=True, prog_bar=True, logger=True)
                 self.log('val_recon_rmse_ema', ema_rmse, on_step=False, on_epoch=True, prog_bar=True, logger=True)
-                self.log('val_recon_amp_corr_ema', ema_amp_corr, on_step=False, on_epoch=True, prog_bar=True, logger=True)
+                self.log('val_recon_amp_corr_ema', ema_amp_corr, on_step=False, on_epoch=True, prog_bar=True,
+                         logger=True)
                 self.log('val_recon_phase_coherence_ema', ema_phase_coh, on_step=False, on_epoch=True, prog_bar=True,
                          logger=True)
                 self.log('val_recon_phase_error_ema', ema_phase_err, on_step=False, on_epoch=True, prog_bar=True,
@@ -344,18 +366,17 @@ class PixelDiffusionConditional(pl.LightningModule):
         random noise and iteratively denoises to produce the final reconstruction.
         """
         del batch_idx, dataloader_idx
-        input,_ = batch
-        pred = self.model(self.input_T(input))
-        return self.output_T(pred)
+        input, _ = batch
+        rec = self.model(self.input_T(input))
+        return self.output_T(rec)
 
     @torch.no_grad()
     def _predict_with_ema_model(self, input_batch):
         """Run prediction through EMA shadow model if EMA is enabled."""
         if self.ema is None:
             return None
-        pred = self.ema.ema_model(self.input_T(input_batch))
-        return self.output_T(pred)
-
+        rec = self.ema.ema_model(self.input_T(input_batch))
+        return self.output_T(rec)
 
     def configure_optimizers(self):
         """Create optimizer and ReduceLROnPlateau scheduler monitored on `val_loss`."""
@@ -380,39 +401,45 @@ class PixelDiffusionConditional(pl.LightningModule):
                  prog_bar=False, logger=True)
         self.log(f'{stage}_hybrid/phase_loss', loss_details['phase_loss_mean'], on_step=log_on_step, on_epoch=True,
                  prog_bar=False, logger=True)
-        self.log(f'{stage}_hybrid/advanced_loss', loss_details['advanced_loss_mean'], on_step=log_on_step, on_epoch=True,
+        self.log(f'{stage}_hybrid/advanced_loss', loss_details['advanced_loss_mean'], on_step=log_on_step,
+                 on_epoch=True, prog_bar=False, logger=True)
+        self.log(f'{stage}_hybrid/loss', loss_details['hybrid_loss_mean'], on_step=log_on_step, on_epoch=True,
                  prog_bar=False, logger=True)
-        self.log(f'{stage}_hybrid/loss', loss_details['hybrid_loss_mean'], on_step=log_on_step, on_epoch=True, prog_bar=False,
-                 logger=True)
         self.log(f'{stage}_hybrid/advanced_t_fraction', loss_details['advanced_t_fraction'], on_step=log_on_step,
                  on_epoch=True, prog_bar=False, logger=True)
 
-    def _compute_reconstruction_metrics(self, pred_batch, target_batch):
+    def _compute_reconstruction_metrics(self, rec_batch, ref_batch):
         """Compute batch-level reconstruction metrics from [-1, 1] tensors transformed to physical SAR scale."""
-        pred = pred_batch.detach().float().clamp(-1, 1)
-        target = target_batch.detach().float().clamp(-1, 1)
+        rec = rec_batch.detach().float().clamp(-1, 1)
+        ref = ref_batch.detach().float().clamp(-1, 1)
 
-        l1 = F.l1_loss(pred, target)
-        rmse = torch.sqrt(F.mse_loss(pred, target))
+        l1 = F.l1_loss(rec, ref)
+        rmse = torch.sqrt(F.mse_loss(rec, ref))
 
         # Compute phase metrics on physical I/Q values (undo signed-log normalization first).
-        pred_phys = self._inverse_signed_log_normalize(pred)
-        target_phys = self._inverse_signed_log_normalize(target)
+        rec_phys = self._inverse_signed_log_normalize(rec)
+        ref_phys = self._inverse_signed_log_normalize(ref)
 
-        pred_cplx_phys = self._to_complex_channels(pred_phys)
-        target_cplx_phys = self._to_complex_channels(target_phys)
+        is_amp_only = rec.shape[1] == 1
 
-        pred_mag_phys = torch.abs(pred_cplx_phys).cpu().numpy()
-        target_mag_phys = torch.abs(target_cplx_phys).cpu().numpy()
+        if is_amp_only:
+            rec_mag_phys = rec_phys.cpu().numpy()
+            ref_mag_phys = ref_phys.cpu().numpy()
+        else:
+            rec_cplx_phys = self._to_complex_channels(rec_phys)
+            ref_cplx_phys = self._to_complex_channels(ref_phys)
+
+            rec_mag_phys = torch.abs(rec_cplx_phys).cpu().numpy()
+            ref_mag_phys = torch.abs(ref_cplx_phys).cpu().numpy()
 
         psnr_vals, ssim_vals, amp_corr_vals = [], [], []
-        for i in range(pred_mag_phys.shape[0]):
-            p_mag = pred_mag_phys[i]
-            t_mag = target_mag_phys[i]
+        for i in range(rec_mag_phys.shape[0]):
+            p_mag = rec_mag_phys[i]
+            t_mag = ref_mag_phys[i]
 
             p_flat = p_mag.flatten()
             t_flat = t_mag.flatten()
-            corr = np.corrcoef(p_flat, t_flat)[0,1]
+            corr = np.corrcoef(p_flat, t_flat)[0, 1]
 
             if np.isnan(corr):
                 corr = 0.0
@@ -435,24 +462,33 @@ class PixelDiffusionConditional(pl.LightningModule):
                 win_size=11,
                 gaussian_weights=True,
                 sigma=1.5,
-                )
             )
-        psnr = torch.tensor(psnr_vals, device=pred.device, dtype=pred.dtype).mean()
-        ssim = torch.tensor(ssim_vals, device=pred.device, dtype=pred.dtype).mean()
+            )
+        psnr = torch.tensor(psnr_vals, device=rec.device, dtype=rec.dtype).mean()
+        ssim = torch.tensor(ssim_vals, device=rec.device, dtype=rec.dtype).mean()
 
         phase_coh_vals, phase_err_vals = [], []
-        for i in range(pred_cplx_phys.shape[0]):
-            phase_coh_vals.append(self._phase_coherence_mean(pred_cplx_phys[i], target_cplx_phys[i]))
-            phase_err_vals.append(self._phase_error_mean_abs(pred_cplx_phys[i], target_cplx_phys[i]))
+        if is_amp_only:
+            phase_coh = torch.tensor(0.0, device=rec.device)
+            phase_err = torch.tensor(0.0, device=rec.device)
+        else:
+            for i in range(rec_cplx_phys.shape[0]):
+                phase_coh_vals.append(self._phase_coherence_mean(rec_cplx_phys[i], ref_cplx_phys[i]))
+                phase_err_vals.append(self._phase_error_mean_abs(rec_cplx_phys[i], ref_cplx_phys[i]))
 
-        phase_coh = torch.tensor(phase_coh_vals, device=pred.device, dtype=pred.dtype).mean()
-        phase_err = torch.tensor(phase_err_vals, device=pred.device, dtype=pred.dtype).mean()
-        amp_corr = torch.tensor(amp_corr_vals, device=pred.device, dtype=pred.dtype).mean()
+            phase_coh = torch.tensor(phase_coh_vals, device=rec.device, dtype=rec.dtype).mean()
+            phase_err = torch.tensor(phase_err_vals, device=rec.device, dtype=rec.dtype).mean()
+        amp_corr = torch.tensor(amp_corr_vals, device=rec.device, dtype=rec.dtype).mean()
 
         return psnr, ssim, l1, rmse, phase_coh, phase_err, amp_corr
 
     def _inverse_signed_log_normalize(self, tensor: torch.Tensor) -> torch.Tensor:
-        """Undo Complex Amplitude Compression back to physical I/Q scale.."""
+        """Undo Complex Amplitude Compression back to physical I/Q scale."""
+        if tensor.shape[1] == 1:
+            A_comp = (tensor + 1.0) / 2.0
+            A_comp = torch.clamp(A_comp, min=0.0, max=1.0)
+            return torch.expm1(A_comp * self._log_norm_scale)
+
         out = torch.zeros_like(tensor)
 
         if tensor.ndim == 4:
@@ -498,11 +534,11 @@ class PixelDiffusionConditional(pl.LightningModule):
         return torch.complex(tensor, torch.zeros_like(tensor))
 
     @staticmethod
-    def _phase_coherence_mean(pred_cplx: torch.Tensor, target_cplx: torch.Tensor) -> float:
+    def _phase_coherence_mean(pred_cplx: torch.Tensor, ref_cplx: torch.Tensor) -> float:
         eps = 1e-8
-        interferogram = pred_cplx * torch.conj(target_cplx)
+        interferogram = pred_cplx * torch.conj(ref_cplx)
         pred_pow = torch.abs(pred_cplx) ** 2
-        target_pow = torch.abs(target_cplx) ** 2
+        ref_pow = torch.abs(ref_cplx) ** 2
 
         kernel = torch.ones((1, 1, 5, 5), device=pred_cplx.device, dtype=pred_pow.dtype)
         norm = 25.0
@@ -516,15 +552,15 @@ class PixelDiffusionConditional(pl.LightningModule):
         e_int_re = _mean_filter(interferogram.real)
         e_int_im = _mean_filter(interferogram.imag)
         e_pred = _mean_filter(pred_pow)
-        e_target = _mean_filter(target_pow)
+        e_ref = _mean_filter(ref_pow)
 
         numerator = torch.sqrt(e_int_re ** 2 + e_int_im ** 2)
-        denominator = torch.sqrt(torch.clamp(e_pred * e_target, min=eps))
+        denominator = torch.sqrt(torch.clamp(e_pred * e_ref, min=eps))
         coherence = numerator / torch.clamp(denominator, min=eps)
 
         return float(torch.mean(coherence).item())
 
     @staticmethod
-    def _phase_error_mean_abs(pred_cplx: torch.Tensor, target_cplx: torch.Tensor) -> float:
-        phase_diff = torch.angle(pred_cplx * torch.conj(target_cplx))
+    def _phase_error_mean_abs(pred_cplx: torch.Tensor, ref_cplx: torch.Tensor) -> float:
+        phase_diff = torch.angle(pred_cplx * torch.conj(ref_cplx))
         return float(torch.mean(torch.abs(phase_diff)).item())

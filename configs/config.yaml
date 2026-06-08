@@ -2,11 +2,12 @@ seed: 27  # Global random seed for reproducibility across dataloading and model 
 
 data:
   root_dir: "/shared/home/lvanderpeet/AE5822-Thesis/dataset/safetensors_train"
+  amplitude_only: true
   image_height: 256
   image_width: 256
   global_max: 300
   subaperture_config:
-   input_indices: [1]
+   input_indices: [4]
    output_indices: [0]
    active_polarizations: ["VV"] # retrieves only these polarizations ("vv", "vh", "hv", "hh")
   loader:
@@ -24,15 +25,15 @@ data:
 
 model:
   type: diffusion # diffusion (default) or DC2SCN baseline
-  in_channels: 2  # Channels in the conditional input x.
-  out_channels: 2  # Channels in the reconstruction target y.
+  in_channels: 1  # Channels in the conditional input x.
+  out_channels: 1  # Channels in the reconstruction target y.
   num_timesteps: 1000  # Number of diffusion denoising steps.
   schedule: cosine  # Beta schedule variant for the forward process.
   loss_fn: hybrid # 'mse' (L2), 'mae' (L1), or 'hybrid' (MS-SSIM for low t and L1/L2 otherwise).
-  hybrid_base_loss: mse # Only used when loss_fn='hybrid': choose fallback loss at high t ('mse' or 'mae').
+  hybrid_base_loss: mae # Only used when loss_fn='hybrid': choose fallback loss at high t ('mse' or 'mae').
   hybrid_ms_ssim_weight: 1.0 # Factor to scale the MS-SSIM loss
   hybrid_phase_weight: 2.0 # Only used when loss_fn='hybrid': scales the circular phase term inside the advanced loss.
-  hybrid_ms_ssim_t_limit: 150 # Only used when loss_fn='hybrid': apply MS-SSIM for timesteps t <= this limit.
+  hybrid_ms_ssim_t_limit: 500 # Only used when loss_fn='hybrid': apply MS-SSIM for timesteps t <= this limit.
   noise_offset: 0.0 # optional low-frequency offset term to training noise
   ema:
     enabled: true  # Keep an exponential moving average copy of training weights.
@@ -46,12 +47,12 @@ model:
   unet:
     dim: 64  # Base UNet width. Previous setting was 64; 48 reduces parameter count to about half (30M instead of 55M).
     dim_mults: [1, 2, 4, 8]  # Width multipliers per UNet level.
-    channels: 4  # Input channels to UNet; for conditional concat this is usually in_channels + out_channels.
-    out_dim: 2  # UNet output channels; should match model.out_channels.
+    channels: 2  # Input channels to UNet; for conditional concat this is usually in_channels + out_channels.
+    out_dim: 1  # UNet output channels; should match model.out_channels.
     dropout: 0.1 # Fraction of neurons turned off per epoch to prevent overfitting.
 
 optimization:
-  lr: 0.00002  # AdamW learning rate.
+  lr: 0.0001  # AdamW learning rate.
   reduce_lr_on_plateau:
     factor: 0.5  # Multiplicative LR drop factor when metric plateaus.
     patience: 1  # Number of bad validation epochs before LR is reduced.
@@ -79,7 +80,7 @@ trainer:
 logging:
   wandb:
     project: dif_img_rec  # Weights & Biases project name.
-    name: diffusion_ASR_85pct_refinement  # Optional run name; null lets W&B auto-generate one.
+    name: diffusion_ASR_amplitude  # Optional run name; null lets W&B auto-generate one.
     save_dir: logs  # Local directory used by W&B for run files.
     log_model: false  # Whether to upload model artifacts automatically.
     save_config_file: true # Upload the active YAML config file to W&B files/artifacts.

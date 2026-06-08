@@ -18,7 +18,7 @@ class WandBPlottingCallback(Callback):
         self.target_label = target_label
         self._phase_hist_max_batches = phase_hist_max_batches
 
-        # Internal state for epoch-level histograms (Moved out of the model!)
+        # Internal state for epoch-level histograms
         self._val_hist_real_samples = []
         self._val_hist_imag_samples = []
         self._val_hist_mag_samples = []
@@ -39,24 +39,23 @@ class WandBPlottingCallback(Callback):
         if not trainer.is_global_zero:
             return
 
-        input_batch, target_batch = batch
+        deg_batch, ref_batch = batch
 
         # Plot full image panels and KDE ONLY for the first batch
         if batch_idx == 0:
-            pred_batch = pl_module.predict_step(batch, batch_idx)
-            ema_pred_batch = None
+            rec_batch = pl_module.predict_step(batch, batch_idx)
+            ema_rec_batch = None
             if pl_module.ema is not None:
-                ema_pred_batch = pl_module._predict_with_ema_model(input_batch)
+                ema_rec_batch = pl_module._predict_with_ema_model(deg_batch)
 
-            self._log_val_reconstruction(pl_module, input_batch, pred_batch, target_batch, ema_pred_batch)
-            self._log_val_magnitude_kde_db(pl_module, pred_batch, target_batch)
+            self._log_val_reconstruction(pl_module, deg_batch, rec_batch, ref_batch, ema_rec_batch)
+            self._log_val_magnitude_kde_db(pl_module, rec_batch, ref_batch)
 
         # Accumulate histograms for the first N batches
         if batch_idx < self._phase_hist_max_batches:
-            # Re-use pred_batch if we already calculated it for batch 0
             if batch_idx != 0:
-                pred_batch = pl_module.predict_step(batch, batch_idx)
-            self._accumulate_histograms(pl_module, pred_batch, target_batch)
+                rec_batch = pl_module.predict_step(batch, batch_idx)
+            self._accumulate_histograms(pl_module, rec_batch, ref_batch)
 
     def on_validation_epoch_end(self, trainer: pl.Trainer, pl_module: pl.LightningModule) -> None:
         if not trainer.is_global_zero:
@@ -68,19 +67,22 @@ class WandBPlottingCallback(Callback):
     # -------------------------------------------------------------------------
 
     def _to_plot_image(self, pl_module, tensor):
-        """Convert CHW tensor to a matplotlib-friendly image array using CORRECT math."""
-        image = tensor.detach().float().cpu()
+        """Convert CHW tensor to a displayable image array with context-aware colormaps."""
+        image_batched = tensor.detach().float().cpu().unsqueeze(0)
+        phys_image_batched = pl_module._inverse_signed_log_normalize(image_batched).cpu()
+        phys_image = phys_image_batched.squeeze(0)
 
-        # Safely un-normalize using the model's updated complex math
-        phys_image = pl_module._inverse_signed_log_normalize(image).cpu()
+        is_amp_only = phys_image.shape[0] == 1
 
-        if phys_image.shape[0] >= 2:
+        if is_amp_only:
+            mag = phys_image[0].abs().numpy()
+            cmap = "gray"  # High contrast colormap for raw amplitude topologies
+        else:
             cplx = pl_module._to_complex_channels(phys_image)
             mag = torch.abs(cplx).numpy()
             if mag.ndim == 3:
-                mag = mag[0]  # Grab first polarization (e.g., VV)
-        else:
-            mag = phys_image[0].abs().numpy()
+                mag = mag[0]  # Grab first polarization (VV)
+            cmap = "gray"
 
         mean = np.mean(mag)
         std = np.std(mag)
@@ -88,7 +90,7 @@ class WandBPlottingCallback(Callback):
         if vmax <= 0.0:
             vmax = 1.0
 
-        return np.clip(mag / vmax, 0.0, 1.0), "gray"
+        return np.clip(mag / vmax, 0.0, 1.0), cmap
 
     def _build_input_panels(self, pl_module, input_tensor):
         image = input_tensor.detach().float().cpu()
@@ -116,21 +118,21 @@ class WandBPlottingCallback(Callback):
     # Plotting & Logging Execution
     # -------------------------------------------------------------------------
 
-    def _log_val_reconstruction(self, pl_module, input_batch, pred_batch, target_batch, ema_pred_batch=None):
+    def _log_val_reconstruction(self, pl_module, input_batch, rec_batch, target_batch, ema_rec_batch=None):
         if pl_module.logger is None or not hasattr(pl_module.logger, "experiment"):
             return
 
-        pred_img, pred_cmap = self._to_plot_image(pl_module, pred_batch[0])
-        y_img, y_cmap = self._to_plot_image(pl_module, target_batch[0])
+        rec_img, rec_cmap = self._to_plot_image(pl_module, rec_batch[0])
+        ref_img, ref_cmap = self._to_plot_image(pl_module, target_batch[0])
         input_panels = self._build_input_panels(pl_module, input_batch[0])
 
-        plot_items = [*input_panels, (pred_img, pred_cmap, f"{self.target_label}_pred")]
+        plot_items = [*input_panels, (rec_img, rec_cmap, f"{self.target_label}_rec")]
 
-        if ema_pred_batch is not None:
-            ema_img, ema_cmap = self._to_plot_image(pl_module, ema_pred_batch[0])
-            plot_items.append((ema_img, ema_cmap, f"{self.target_label}_pred_ema"))
+        if ema_rec_batch is not None:
+            ema_img, ema_cmap = self._to_plot_image(pl_module, ema_rec_batch[0])
+            plot_items.append((ema_img, ema_cmap, f"{self.target_label}_rec_ema"))
 
-        plot_items.append((y_img, y_cmap, self.target_label))
+        plot_items.append((ref_img, ref_cmap, self.target_label))
 
         fig, axes = plt.subplots(1, len(plot_items), figsize=(4 * len(plot_items), 4))
         if len(plot_items) == 1:
@@ -145,34 +147,41 @@ class WandBPlottingCallback(Callback):
         pl_module.logger.experiment.log({"val/reconstruction": wandb.Image(fig)}, commit=False)
         plt.close(fig)
 
-    def _log_val_magnitude_kde_db(self, pl_module, pred_batch, target_batch):
+    def _log_val_magnitude_kde_db(self, pl_module, rec_batch, target_batch):
         if pl_module.logger is None or not hasattr(pl_module.logger, "experiment"):
             return
 
         eps = 1e-8
-        pred_physical = pl_module._inverse_signed_log_normalize(pred_batch.detach().float())
-        target_physical = pl_module._inverse_signed_log_normalize(target_batch.detach().float())
-        pred_cplx = pl_module._to_complex_channels(pred_physical)[0]
-        target_cplx = pl_module._to_complex_channels(target_physical)[0]
+        rec_physical = pl_module._inverse_signed_log_normalize(rec_batch.detach().float())
+        ref_physical = pl_module._inverse_signed_log_normalize(target_batch.detach().float())
 
-        pred_db = (20.0 * torch.log10(torch.clamp(torch.abs(pred_cplx), min=eps))).flatten().cpu().numpy()
-        target_db = (20.0 * torch.log10(torch.clamp(torch.abs(target_cplx), min=eps))).flatten().cpu().numpy()
+        is_amp_only = rec_batch.shape[1] == 1
 
-        if pred_db.size == 0 or target_db.size == 0:
+        if is_amp_only:
+            rec_mag = rec_physical[0]
+            ref_mag = ref_physical[0]
+        else:
+            rec_mag = torch.abs(pl_module._to_complex_channels(rec_physical)[0])
+            ref_mag = torch.abs(pl_module._to_complex_channels(ref_physical)[0])
+
+        rec_db = (20.0 * torch.log10(torch.clamp(rec_mag, min=eps))).flatten().cpu().numpy()
+        ref_db = (20.0 * torch.log10(torch.clamp(ref_mag, min=eps))).flatten().cpu().numpy()
+
+        if rec_db.size == 0 or ref_db.size == 0:
             return
 
-        lo = float(min(np.percentile(pred_db, 0.2), np.percentile(target_db, 0.2)))
-        hi = float(max(np.percentile(pred_db, 99.8), np.percentile(target_db, 99.8)))
+        lo = float(min(np.percentile(rec_db, 0.2), np.percentile(ref_db, 0.2)))
+        hi = float(max(np.percentile(rec_db, 99.8), np.percentile(ref_db, 99.8)))
         if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
             return
 
         grid = np.linspace(lo, hi, 512)
-        pred_kde = gaussian_kde(pred_db)(grid)
-        target_kde = gaussian_kde(target_db)(grid)
+        rec_kde = gaussian_kde(rec_db)(grid)
+        ref_kde = gaussian_kde(ref_db)(grid)
 
         fig, ax = plt.subplots(figsize=(6, 4))
-        ax.plot(grid, target_kde, label=f"{self.target_label} (reference)", linewidth=2)
-        ax.plot(grid, pred_kde, label=f"{self.target_label}_pred (reconstruction)", linewidth=2)
+        ax.plot(grid, ref_kde, label=f"{self.target_label} (reference)", linewidth=2)
+        ax.plot(grid, rec_kde, label=f"{self.target_label}_rec (reconstruction)", linewidth=2)
         ax.set_xlabel("Magnitude (dB)")
         ax.set_ylabel("Density")
         ax.set_title("Validation Magnitude KDE (dB)")
@@ -183,13 +192,11 @@ class WandBPlottingCallback(Callback):
         pl_module.logger.experiment.log({"val/magnitude_kde_db": wandb.Image(fig)}, commit=False)
         plt.close(fig)
 
-    def _accumulate_histograms(self, pl_module, pred_batch, target_batch):
-        reconstruction_physical = pl_module._inverse_signed_log_normalize(pred_batch.detach().float())
-        recon_complex = pl_module._to_complex_channels(reconstruction_physical)
+    def _accumulate_histograms(self, pl_module, rec_batch, target_batch):
+        rec_physical = pl_module._inverse_signed_log_normalize(rec_batch.detach().float())
+        ref_physical = pl_module._inverse_signed_log_normalize(target_batch.detach().float())
 
-        real_vals = recon_complex.real.flatten().cpu().numpy()
-        imag_vals = recon_complex.imag.flatten().cpu().numpy()
-        mag_vals = torch.abs(recon_complex).flatten().cpu().numpy()
+        is_amp_only = rec_batch.shape[1] == 1
 
         def _subsample(values):
             if values.size <= self._val_hist_samples_per_batch:
@@ -197,24 +204,28 @@ class WandBPlottingCallback(Callback):
             idx = np.linspace(0, values.size - 1, self._val_hist_samples_per_batch, dtype=int)
             return values[idx]
 
-        self._val_hist_real_samples.append(_subsample(real_vals))
-        self._val_hist_imag_samples.append(_subsample(imag_vals))
-        self._val_hist_mag_samples.append(_subsample(mag_vals))
+        if is_amp_only:
+            mag_vals = rec_physical.flatten().cpu().numpy()
+            self._val_hist_mag_samples.append(_subsample(mag_vals))
+        else:
+            recon_complex = pl_module._to_complex_channels(rec_physical)
+            target_complex = pl_module._to_complex_channels(ref_physical)
 
-        target_physical = pl_module._inverse_signed_log_normalize(target_batch.detach().float())
-        target_cplx = pl_module._to_complex_channels(target_physical)
+            real_vals = recon_complex.real.flatten().cpu().numpy()
+            imag_vals = recon_complex.imag.flatten().cpu().numpy()
+            mag_vals = torch.abs(recon_complex).flatten().cpu().numpy()
 
-        phase_err = torch.abs(torch.angle(recon_complex * torch.conj(target_cplx))).flatten().cpu().numpy()
-        self._val_phase_err_samples.append(_subsample(phase_err))
+            self._val_hist_real_samples.append(_subsample(real_vals))
+            self._val_hist_imag_samples.append(_subsample(imag_vals))
+            self._val_hist_mag_samples.append(_subsample(mag_vals))
+
+            phase_err = torch.abs(torch.angle(recon_complex * torch.conj(target_complex))).flatten().cpu().numpy()
+            self._val_phase_err_samples.append(_subsample(phase_err))
 
     def _plot_and_log_histograms(self, pl_module):
         if pl_module.logger is None or not hasattr(pl_module.logger, "experiment") or len(
-                self._val_hist_real_samples) == 0:
+                self._val_hist_mag_samples) == 0:
             return
-
-        real_vals = np.concatenate(self._val_hist_real_samples)
-        imag_vals = np.concatenate(self._val_hist_imag_samples)
-        mag_vals = np.concatenate(self._val_hist_mag_samples)
 
         def _cap_samples(vals):
             if vals.size > self._val_hist_max_samples:
@@ -222,37 +233,51 @@ class WandBPlottingCallback(Callback):
                 return vals[idx]
             return vals
 
-        real_vals, imag_vals, mag_vals = map(_cap_samples, [real_vals, imag_vals, mag_vals])
-
+        mag_vals = _cap_samples(np.concatenate(self._val_hist_mag_samples))
         bins = 120
-        fig, axes = plt.subplots(1, 3, figsize=(15, 4))
-        axes[0].hist(real_vals, bins=bins, color="steelblue", alpha=0.85)
-        axes[0].set_title("Real (I)")
-        axes[1].hist(imag_vals, bins=bins, color="darkorange", alpha=0.85)
-        axes[1].set_title("Imag (Q)")
-        axes[2].hist(mag_vals, bins=bins, color="seagreen", alpha=0.85)
-        axes[2].set_title("Magnitude")
+        is_amp_only = len(self._val_hist_real_samples) == 0
 
-        for ax in axes:
+        if is_amp_only:
+            fig, ax = plt.subplots(1, 1, figsize=(6, 4))
+            ax.hist(mag_vals, bins=bins, color="seagreen", alpha=0.85)
+            ax.set_title("Amplitude Topology")
             ax.grid(alpha=0.25, linestyle="--")
-        fig.suptitle("Validation Reconstruction Histogram (Physical Scale)")
-        fig.tight_layout()
+            fig.suptitle("Validation Reconstruction Histogram (Physical Scale)")
+            fig.tight_layout()
+        else:
+            real_vals = _cap_samples(np.concatenate(self._val_hist_real_samples))
+            imag_vals = _cap_samples(np.concatenate(self._val_hist_imag_samples))
+
+            fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+            axes[0].hist(real_vals, bins=bins, color="steelblue", alpha=0.85)
+            axes[0].set_title("Real (I)")
+            axes[1].hist(imag_vals, bins=bins, color="darkorange", alpha=0.85)
+            axes[1].set_title("Imag (Q)")
+            axes[2].hist(mag_vals, bins=bins, color="seagreen", alpha=0.85)
+            axes[2].set_title("Magnitude")
+
+            for ax in axes:
+                ax.grid(alpha=0.25, linestyle="--")
+            fig.suptitle("Validation Reconstruction Histogram (Physical Scale)")
+            fig.tight_layout()
 
         pl_module.logger.experiment.log({"val/reconstruction_histograms": wandb.Image(fig)}, commit=False)
         plt.close(fig)
 
-        phase_vals = _cap_samples(np.concatenate(self._val_phase_err_samples))
+        # Skip logging phase charts if training on amplitude data
+        if not is_amp_only and len(self._val_phase_err_samples) > 0:
+            phase_vals = _cap_samples(np.concatenate(self._val_phase_err_samples))
 
-        fig, ax = plt.subplots(1, 1, figsize=(6, 4))
-        ax.hist(phase_vals, bins=120, color="mediumpurple", alpha=0.9)
-        ax.set_title("Validation Phase Error Histogram")
-        ax.set_xlabel("|Wrapped phase error| [rad]")
-        ax.set_ylabel("Count")
-        ax.grid(alpha=0.25, linestyle="--")
-        fig.tight_layout()
+            fig, ax = plt.subplots(1, 1, figsize=(6, 4))
+            ax.hist(phase_vals, bins=120, color="mediumpurple", alpha=0.9)
+            ax.set_title("Validation Phase Error Histogram")
+            ax.set_xlabel("|Wrapped phase error| [rad]")
+            ax.set_ylabel("Count")
+            ax.grid(alpha=0.25, linestyle="--")
+            fig.tight_layout()
 
-        pl_module.logger.experiment.log({"val/phase_error_histogram": wandb.Image(fig)}, commit=False)
-        plt.close(fig)
+            pl_module.logger.experiment.log({"val/phase_error_histogram": wandb.Image(fig)}, commit=False)
+            plt.close(fig)
 
 
 class DC2SCNPhaseRowCallback(pl.Callback):
@@ -269,6 +294,10 @@ class DC2SCNPhaseRowCallback(pl.Callback):
         if trainer.logger is None or not hasattr(trainer.logger, 'experiment'):
             return
 
+        # Early check: Exit safely if the model is operating on 1-channel amplitude maps
+        if next(pl_module.parameters()).shape[1] == 1:
+            return
+
         val_dataloader = trainer.datamodule.val_dataloader()
         batch = next(iter(val_dataloader))
 
@@ -278,30 +307,33 @@ class DC2SCNPhaseRowCallback(pl.Callback):
 
         with torch.no_grad():
             if hasattr(pl_module.model, 'sample'):
-                preds = pl_module.model.sample(x)
+                recs = pl_module.model.sample(x)
             else:
-                preds = pl_module(x)
+                recs = pl_module(x)
 
-        target_phys = pl_module._inverse_signed_log_normalize(y)
-        pred_phys = pl_module._inverse_signed_log_normalize(preds.clamp(-1.0, 1.0))
+        ref_phys = pl_module._inverse_signed_log_normalize(y)
+        rec_phys = pl_module._inverse_signed_log_normalize(recs.clamp(-1.0, 1.0))
 
-        target_cplx = pl_module._to_complex_channels(target_phys)
-        pred_cplx = pl_module._to_complex_channels(pred_phys)
+        if rec_phys.shape[1] == 1:
+            return
+
+        ref_cplx = pl_module._to_complex_channels(ref_phys)
+        rec_cplx = pl_module._to_complex_channels(rec_phys)
 
         plots = []
 
         for i in range(self.num_samples):
-            mag = torch.abs(target_cplx[i, 0])  # Shape: [H, W]
+            mag = torch.abs(ref_cplx[i, 0])  # Shape: [H, W]
 
             max_idx = torch.argmax(mag)
             y_max, x_max = np.unravel_index(max_idx.cpu().numpy(), mag.shape)
 
-            target_phase = torch.angle(target_cplx[i, 0, y_max, :]).cpu().numpy()
-            pred_phase = torch.angle(pred_cplx[i, 0, y_max, :]).cpu().numpy()
+            ref_phase = torch.angle(ref_cplx[i, 0, y_max, :]).cpu().numpy()
+            rec_phase = torch.angle(rec_cplx[i, 0, y_max, :]).cpu().numpy()
 
             fig, ax = plt.subplots(figsize=(10, 4))
-            ax.plot(target_phase, label="Reference Phase", color='blue', linestyle='--', linewidth=2)
-            ax.plot(pred_phase, label="Predicted Phase", color='red', alpha=0.7, linewidth=2)
+            ax.plot(ref_phase, label="Reference Phase", color='blue', linestyle='--', linewidth=2)
+            ax.plot(rec_phase, label="Predicted Phase", color='red', alpha=0.7, linewidth=2)
 
             ax.set_title(f"1D Phase Slice at Row {y_max} (Peak Target)")
             ax.set_xlabel("Range (Pixels)")
@@ -312,7 +344,7 @@ class DC2SCNPhaseRowCallback(pl.Callback):
             plt.tight_layout()
 
             plots.append(wandb.Image(fig, caption=f"Sample {i} - Row {y_max}"))
-            plt.close(fig)  # Free memory to prevent memory leaks
+            plt.close(fig)
 
         trainer.logger.experiment.log({
             "val/dc2scn_phase_slice": plots,
