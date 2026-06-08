@@ -48,17 +48,14 @@ def _normalize(x, y, global_max=4257):
     y = torch.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
 
     denom = np.log1p(global_max)
-    x[0::2] = torch.log1p(x[0::2]) / denom
-    y[0::2] = torch.log1p(y[0::2]) / denom
+    # x[0::2] = torch.log1p(x[0::2]) / denom
+    # y[0::2] = torch.log1p(y[0::2]) / denom
+    x = torch.log1p(x) / denom
+    y = torch.log1p(y) / denom
 
-    ## Map [0, 1] to [-1, 1] for diffusion
-    x[0::2] = x[0::2] * 2.0 - 1.0
-    y[0::2] = y[0::2] * 2.0 - 1.0
+    # TODO: implement normalization for both magnitude and phase
 
-    x[1::2] = x[1::2] / np.pi
-    y[1::2] = y[1::2] / np.pi
-
-    return torch.clamp(x, -1.0, 1.0), torch.clamp(y, -1.0, 1.0)
+    return torch.clamp(x, 0.0, 1.0), torch.clamp(y, 0.0, 1.0)
 
 
 def _strip_crop(x, y, target_h, target_w):
@@ -147,11 +144,11 @@ class ComplexSARDataset(Dataset):
             n = len(self.patch_ids)
 
             if split == 'train':
-                self.patch_ids = self.patch_ids[:int(0.8 *  n)]
+                self.patch_ids = self.patch_ids[:int(0.9 *  n)]
             elif split == 'valid':
-                self.patch_ids = self.patch_ids[int(0.8 * n):int(0.9 * n)]
+                self.patch_ids = self.patch_ids[int(0.9 * n):int(0.95 * n)]
             elif split == 'test':
-                self.patch_ids = self.patch_ids[int(0.9 * n):]
+                self.patch_ids = self.patch_ids[int(0.95 * n):]
             else:
                 raise ValueError(f"Invalid split name: '{split}'. Expected 'train', 'valid', or 'test'.")
             print(f"Split {split}: Found {len(self.patch_ids)} valid patched containing {self.requested_pols}")
@@ -175,11 +172,12 @@ class ComplexSARDataset(Dataset):
             arr = arr[np.newaxis, ...]
 
         mag = np.abs(arr).astype(np.float32)
-        phase = np.angle(arr).astype(np.float32)
+        # phase = np.angle(arr).astype(np.float32)
 
-        combined = np.stack([mag, phase], axis=1).reshape(-1, arr.shape[-2], arr.shape[-1])
+        # combined = np.stack([mag, phase], axis=1).reshape(-1, arr.shape[-2], arr.shape[-1])
 
-        return torch.from_numpy(combined)
+        # return torch.from_numpy(combined)
+        return torch.from_numpy(mag)
 
     def __getitem__(self, idx):
         """
@@ -271,13 +269,62 @@ def build_complex_datasets_from_config(config_path: str):
 
 if __name__ == "__main__":
     train_ds, val_ds, test_ds = build_complex_datasets_from_config("/shared/home/lvanderpeet/AE5822-Thesis/configs/config.yaml")
-    x, y, meta = train_ds[0]
-    print(x.shape, y.shape, meta["incidence_angle"], meta["idx"])
-    x, y, meta = test_ds[0]
-    target_patch_id = meta["patch_id"]
+    # x, y, meta = train_ds[0]
+    # print(x.shape, y.shape, meta["incidence_angle"], meta["idx"])
+    # x, y, meta = test_ds[0]
+    # target_patch_id = meta["patch_id"]
+    #
+    # print(f"Analyzing Patch ID: {target_patch_id}")
 
-    print(f"Analyzing Patch ID: {target_patch_id}")
+    def export_full_aperture(root_dir, patch_id, pols=['vv', 'vh']):
+        """
+        Accesses the 'img' directory directly to get the raw complex data.
+        """
+        all_pols = []
 
+        for pol in pols:
+            # Path based on your image: /.../archive/0000000/vv/img
+            zarr_path = os.path.join(root_dir, str(patch_id), pol, "img")
+
+            if not os.path.exists(zarr_path):
+                print(f"Warning: No 'img' folder found for {pol} in patch {patch_id}")
+                continue
+
+            # 1. Open and load the complex data
+            zarr_array = zarr.open_array(zarr_path, mode='r')
+
+            # 2. Extract the array and ensure it has 3 dims (1, H, W) for concatenation
+            data = np.array(zarr_array[:]).astype(np.complex128)
+            if data.ndim == 2:
+                data = data[np.newaxis, ...]
+
+            # 3. CRITICAL: Add the data to our list
+            all_pols.append(data)
+            print(f"✅ Loaded {pol} raw complex data.")
+
+        # 4. Check if we actually found anything
+        if not all_pols:
+            print("❌ Error: No polarization folders were found. Check your root path.")
+            return None
+
+        # 5. Concatenate along the channel dimension (e.g., shape becomes (2, H, W))
+        final_array = np.concatenate(all_pols, axis=0)
+
+        filename = f"complex_full_aperture_{patch_id}.npy"
+        np.save(filename, final_array)
+
+        print(f"--- Exported Full Aperture ---")
+        print(f"   Final Shape: {final_array.shape}")
+        print(f"   Dtype:       {final_array.dtype}")
+        print(f"   Sample (vv): {final_array[0, 0, 0]}")  # Top-left pixel of first pol
+
+        return final_array
+
+
+    root = "/shared/home/lvanderpeet/AE5822-Thesis/dataset/archive"
+    pid = "0000000"
+
+    full_data = export_full_aperture(root, pid)
 
     # def check_shapes(ds, name):
     #     print(f"\nChecking shapes for {name}...")

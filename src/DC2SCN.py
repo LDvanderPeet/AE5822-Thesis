@@ -77,31 +77,37 @@ class DC2SCNLightning(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         x, y = batch
 
-        # 1. NETWORK PREDICTION
-        pred_norm = self(x)
+        # 1. NETWORK PREDICTION (Now acts as the SA2 Residual)
+        residual_norm = self(x)
 
-        # 2. INVERSE NORMALIZATION
-        pred_phys = self._inverse_signed_log_normalize(pred_norm)
+        # 2. INVERSE NORMALIZATION (Move to Physical Domain)
+        residual_phys = self._inverse_signed_log_normalize(residual_norm)
+
+        # Extract inputs to build the Baseline (SA1 + SA3)
+        cond_phys = self._inverse_signed_log_normalize(x)
+        sa1_phys = cond_phys[:, 0:2, :, :]
+        sa3_phys = cond_phys[:, 2:4, :, :]
+
         y_phys = self._inverse_signed_log_normalize(y)
 
+        # 3. ADDABBO GLOBAL SKIP CONNECTION
+        # Baseline = SA1 + SA3. Final Prediction = Baseline + Residual
+        baseline_phys = sa1_phys + sa3_phys
+        pred_phys = baseline_phys + residual_phys
+
+        # Convert to complex tensors for the loss functions
         pred_cplx = self._to_complex_channels(pred_phys)
         y_cplx = self._to_complex_channels(y_phys)
 
-        # 3. GRADIENT-SAFE PHYSICAL LOSSES
-        # Magnitude Loss
+        # 4. GRADIENT-SAFE PHYSICAL LOSSES
         loss_mag = F.l1_loss(torch.abs(pred_cplx), torch.abs(y_cplx))
 
-        # Phase Loss (Unit Vector Distance)
-        # We divide by magnitude (plus epsilon) to extract pure phase as a unit vector on a circle.
         eps = 1e-8
         pred_unit = pred_cplx / (torch.abs(pred_cplx) + eps)
         y_unit = y_cplx / (torch.abs(y_cplx) + eps)
-
-        # The squared distance between two complex unit vectors safely penalizes phase misalignment
-        # without ever using the unstable torch.angle() derivative!
         loss_phase = torch.mean(torch.abs(pred_unit - y_unit) ** 2)
 
-        # 4. Total Loss
+        # 5. Total Loss
         total_loss = loss_mag + (0.5 * loss_phase)
 
         self.log('train_loss', total_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
@@ -113,15 +119,26 @@ class DC2SCNLightning(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         x, y = batch
 
-        pred_norm = self(x)
+        # 1. Network Predicts Residual
+        residual_norm = self(x)
 
-        pred_phys = self._inverse_signed_log_normalize(pred_norm)
+        # 2. Inverse Normalization
+        residual_phys = self._inverse_signed_log_normalize(residual_norm)
+
+        cond_phys = self._inverse_signed_log_normalize(x)
+        sa1_phys = cond_phys[:, 0:2, :, :]
+        sa3_phys = cond_phys[:, 2:4, :, :]
+
         y_phys = self._inverse_signed_log_normalize(y)
+
+        # 3. Addabbo Global Skip Connection
+        baseline_phys = sa1_phys + sa3_phys
+        pred_phys = baseline_phys + residual_phys
 
         pred_cplx = self._to_complex_channels(pred_phys)
         y_cplx = self._to_complex_channels(y_phys)
 
-        # Same Gradient-Safe losses for validation
+        # 4. Gradient-Safe Physical Losses
         loss_mag = F.l1_loss(torch.abs(pred_cplx), torch.abs(y_cplx))
 
         eps = 1e-8
@@ -133,8 +150,25 @@ class DC2SCNLightning(pl.LightningModule):
 
         self.log('val_loss', val_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
 
+        # 5. RE-NORMALIZE AND CALCULATE METRICS
         if batch_idx == 0:
-            psnr, ssim, l1, phase_coh, phase_err = self._compute_reconstruction_metrics(pred_norm, y)
+            # We must carefully reverse the physical normalization back to log-scale
+            # so your metric helper doesn't explode when it clamps between [-1, 1].
+            pred_norm_final = torch.zeros_like(pred_phys)
+
+            # Get the physical I/Q components and Magnitude
+            I_phys, Q_phys = pred_phys[:, 0::2], pred_phys[:, 1::2]
+            A_phys = torch.sqrt(I_phys ** 2 + Q_phys ** 2)
+
+            # Reverse the expm1 to get back to the log-compressed magnitude
+            A_comp = torch.log1p(A_phys) / self._log_norm_scale
+
+            # Re-apply the phase angles to the log-compressed magnitude
+            pred_norm_final[:, 0::2] = A_comp * (I_phys / (A_phys + eps))
+            pred_norm_final[:, 1::2] = A_comp * (Q_phys / (A_phys + eps))
+
+            # Pass the correctly re-normalized prediction to your helper
+            psnr, ssim, l1, phase_coh, phase_err = self._compute_reconstruction_metrics(pred_norm_final, y)
 
             self.log('val_recon_psnr', psnr, on_step=False, on_epoch=True, prog_bar=True, logger=True)
             self.log('val_recon_ssim', ssim, on_step=False, on_epoch=True, prog_bar=True, logger=True)

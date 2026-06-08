@@ -1,16 +1,19 @@
 import os
-import zarr
+import glob
 import numpy as np
-import yaml
-from tqdm import tqdm
-import shutil
 import matplotlib.pyplot as plt
+from safetensors.torch import load_file
+import torch
+from joblib import Parallel, delayed
+from tqdm import tqdm
+import h5py
+import torch.nn.functional as F
+from scipy.ndimage import maximum_filter, uniform_filter
 
+# ---- Matplotlib Global Settings ----
 plt.rcdefaults()
-
 plt.rcParams.update({
     "font.family": "serif",
-    # This list provides fallbacks. It will try to find a serif font that exists.
     "font.serif": ["Liberation Serif", "DejaVu Serif", "Bitstream Vera Serif", "Computer Modern Serif"],
     "font.size": 10,
     "axes.labelsize": 10,
@@ -26,194 +29,299 @@ plt.rcParams.update({
 })
 
 
-def load_complex_patch(root_dir, patch_id : str, pol, sub_folder):
-    path = os.path.join(root_dir, patch_id, pol, sub_folder)
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"Path not found: {path}")
-    data_zarr = zarr.open(path, mode='r')
-    return np.array(data_zarr).astype(np.complex64)
+# ==========================================
+# 1. Single Patch Inspection
+# ==========================================
+def inspect_single_patch(file_path):
+    """Loads a single safetensor patch and plots the Magnitude + I/Q Distributions."""
+    if not os.path.exists(file_path):
+        print(f"File not found: {file_path}")
+        return
 
-def plot_patch(root_dir, patch_id, pol, sub_folder):
-    data = load_complex_patch(root_dir, patch_id, pol, sub_folder)
-    sample = data[0] if data.ndim == 3 else data
+    data = load_file(file_path)["x"]
+    i_comp = data[0].numpy()
+    q_comp = data[1].numpy()
 
-    mag = np.abs(sample)
-    phase = np.angle(sample)
+    mag = np.sqrt(i_comp ** 2 + q_comp ** 2)
+    mean_val, std_val = np.mean(mag), np.std(mag)
+    vmax_disp = mean_val + (3 * std_val)  # 3-sigma clipping for visual clarity
 
-    fig, ax = plt.subplots(1, 2, figsize=(12,5))
-    im1 = ax[0].imshow(mag, cmap='magma')
-    ax[0].set_title(f"Patch {patch_id} Magnitude")
-    plt.colorbar(im1, ax=ax[0])
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
 
-    im2 = ax[1].imshow(phase, cmap='gray')
-    ax[1].set_title(f"Patch {patch_id} Phase")
-    plt.colorbar(im2, ax=ax[1])
+    # Plot A: Amplitude Image
+    axes[0].imshow(np.clip(mag, 0, vmax_disp), cmap='gray')
+    axes[0].set_title(f"SAR Magnitude (Clipped at 3σ: {vmax_disp:.2f})")
+    axes[0].axis('off')
 
+    # Plot B: I/Q Scatter
+    axes[1].scatter(i_comp.flatten(), q_comp.flatten(), s=1, alpha=0.1, c='blue')
+    axes[1].set_title("Complex Plane (I vs Q)")
+    axes[1].set_xlabel("In-Phase (I)")
+    axes[1].set_ylabel("Quadrature (Q)")
+    axes[1].grid(True)
+
+    # Plot C: Magnitude Histogram (Log Scale)
+    axes[2].hist(mag.flatten(), bins=100, color='darkred', alpha=0.7)
+    axes[2].set_title("Magnitude Distribution (Log Y)")
+    axes[2].set_xlabel("Absolute Amplitude")
+    axes[2].set_yscale('log')
+
+    plt.suptitle(f"Patch Analysis: {os.path.basename(file_path)}", fontsize=14)
     plt.tight_layout()
     plt.show()
 
-def plot_patch_dist(root_dir, patch_id, pol, sub_folder):
-    data = load_complex_patch(root_dir, patch_id, pol, sub_folder)
-    fig, ax = plt.subplots(1, 3, figsize=(18,5))
-    sample = data.flatten()
 
-    ax[0].hist(sample.real, bins=100, color='gray', alpha=0.7)
-    ax[0].set_title(f"Real Component")
-    ax[0].set_yscale("log")
+# ==========================================
+# 2. Full Tile Reconstruction
+# ==========================================
+def plot_full_original_tile(h5_file_path, downsample_factor=4, group_name="bands"):
+    """
+    Loads a full, un-patched SAR tile directly from an HDF5 file.
+    Calculates the Full Aperture VV magnitude and plots it.
+    """
+    if not os.path.exists(h5_file_path):
+        print(f"File not found: {h5_file_path}")
+        return
 
-    ax[1].hist(sample.imag, bins=100, color='gray', alpha=0.7)
-    ax[1].set_title(f"Imaginary Component")
-    ax[1].set_yscale("log")
+    print(f"Loading full tile: {os.path.basename(h5_file_path)}...")
 
-    ax[2].hist(np.abs(sample), bins=100, color='gray', alpha=0.7)
-    ax[2].set_yscale("log")
-    ax[2].set_title(f"Magnitude")
+    with h5py.File(h5_file_path, 'r') as f:
+        if group_name not in f:
+            print(f"Error: Group '{group_name}' not found in the H5 file. Available keys: {list(f.keys())}")
+            return
 
-    plt.suptitle(f"Component Distributions for Patch {patch_id}")
+        group = f[group_name]
+
+        if "i_VV" not in group or "q_VV" not in group:
+            print(
+                f"Error: 'i_VV' or 'q_VV' not found in group '{group_name}'. Available datasets: {list(group.keys())}")
+            return
+
+        print(f"Applying downsampling factor of {downsample_factor}x...")
+        i_comp = group["i_VV"][::downsample_factor, ::downsample_factor].astype(np.float32)
+        q_comp = group["q_VV"][::downsample_factor, ::downsample_factor].astype(np.float32)
+
+    print(f"Loaded array shape: {i_comp.shape}")
+    print("Calculating Magnitude...")
+    mag = np.sqrt(np.square(i_comp) + np.square(q_comp))
+
+    active_pixels = mag[mag > 0]
+    if len(active_pixels) == 0:
+        print("Warning: The loaded array is entirely zeros.")
+        return
+
+    mean_val, std_val = np.mean(active_pixels), np.std(active_pixels)
+    # A 4-sigma clip is standard for full SAR scenes to highlight corner reflectors
+    # while keeping the speckle visible.
+    vmax_disp = mean_val + (4 * std_val)
+
+    print("Rendering full scene...")
+    plt.figure(figsize=(14, 10))
+    plt.imshow(np.clip(mag, 0, vmax_disp), cmap='gray')
+    plt.title(
+        f"Original SAR Tile (VV Polarization)\n{os.path.basename(h5_file_path)}\n(Downsampled {downsample_factor}x)")
+    plt.colorbar(label="Amplitude")
+    plt.axis('off')
+
+    save_filename = f"Full_Tile_{os.path.basename(h5_file_path).replace('.h5', '')}.pdf"
+    plt.savefig(save_filename, bbox_inches='tight')
+    print(f"Saved high-res render to: {save_filename}")
+
     plt.show()
 
 
-def plot_global_stats(root_dir, pols, sub_folder):
-    patch_ids = sorted([d for d in os.listdir(root_dir) if d.isdigit()])
-    mins, means, maxes, p999s = [], [], [], []
+# ==========================================
+# 3. Global Dataset Statistics
+# ==========================================
+def _process_single_file_stats(path):
+    """Helper for parallel processing."""
+    try:
+        data = load_file(path)["x"]  # [16, 128, 128]
+        sum_x = torch.sum(data, dim=(1, 2)).numpy()
+        sum_x2 = torch.sum(data ** 2, dim=(1, 2)).numpy()
+        count = data.shape[1] * data.shape[2]
+        min_v = data.amin(dim=(1, 2)).numpy()
+        max_v = data.amax(dim=(1, 2)).numpy()
+        return sum_x, sum_x2, count, min_v, max_v
+    except Exception:
+        return None
 
-    print(f"Checking first path: {os.path.join(root_dir, patch_ids[0], pols[0], sub_folder)}")
 
-    print(f"Scanning {len(patch_ids)} patches...")
-    for pid in tqdm(patch_ids):
-        for pol in pols:
-            # 1. Construct the path
-            path = os.path.join(root_dir, pid, pol, sub_folder)
+def compute_dataset_statistics(root_dir, n_jobs=16):
+    """Calculates Mean, Std, Min, Max across the entire dataset."""
+    print("Collecting file list...")
+    all_paths = glob.glob(os.path.join(root_dir, "**/*.safetensors"), recursive=True)
 
-            # 2. Check if this specific polarization exists for this patch
-            if not os.path.exists(path):
-                continue  # Skip silently, just like your dataset.py does
+    print(f"Starting stats calculation for {len(all_paths)} files...")
+    results = Parallel(n_jobs=n_jobs)(delayed(_process_single_file_stats)(p) for p in tqdm(all_paths))
+    results = [r for r in results if r is not None]
 
-            try:
-                # 3. Load and calculate
-                data = load_complex_patch(root_dir, pid, pol, sub_folder)
-                mag = np.abs(data)
+    if not results:
+        print("No valid data found.")
+        return
 
-                # Check for NaNs to prevent empty plots
-                if np.isnan(mag).any():
-                    continue
+    # Aggregate
+    total_sum = np.zeros(16)
+    total_sum_x2 = np.zeros(16)
+    total_count = 0
+    global_min = np.full(16, np.inf)
+    global_max = np.full(16, -np.inf)
 
-                mins.append(float(np.min(mag)))
-                means.append(float(np.mean(mag)))
-                maxes.append(float(np.max(mag)))
-                p999s.append(float(np.quantile(mag, 0.999)))
+    for s, s2, c, mi, ma in results:
+        total_sum += s
+        total_sum_x2 += s2
+        total_count += c
+        global_min = np.minimum(global_min, mi)
+        global_max = np.maximum(global_max, ma)
 
-            except Exception as e:
-                # This catches unexpected Zarr corruption
-                print(f"Error processing {path}: {e}")
-                continue
-    fig, ax = plt.subplots(2, 2, figsize=(15,10))
-    ax[0, 0].hist(mins, bins=50, color='white', edgecolor='black', linewidth=0.5, alpha=0.7)
-    ax[0, 0].set_title("Global Minima Distribution")
+    mean = total_sum / total_count
+    var = (total_sum_x2 / total_count) - (mean ** 2)
+    std = np.sqrt(np.maximum(var, 1e-10))
 
-    ax[0, 1].hist(means, bins=50, color='silver', edgecolor='black', linewidth=0.5, alpha=0.7)
-    ax[0, 1].set_title("Global Means Distribution")
+    print("\n--- Global Stats per Channel ---")
+    print(f"{'Chan':<5} | {'Mean':<10} | {'Std':<10} | {'Min':<10} | {'Max':<10}")
+    for i in range(16):
+        print(f"{i:<5} | {mean[i]:.4f} | {std[i]:.4f} | {global_min[i]:.4f} | {global_max[i]:.4f}")
 
-    ax[1, 0].hist(maxes, bins=50, color='silver', edgecolor='black', linewidth=0.5, alpha=0.7)
-    ax[1, 0].set_title("Global Maxima Distribution (Log)")
-    ax[1, 0].set_yscale('log')
+# ==========================================
+# 4. Subaperture linearity test
+# ==========================================
+def test_subaperture_linearity(patch_path):
+    if not os.path.exists(patch_path):
+        print(f"File not found: {patch_path}")
+        return
 
-    ax[1, 1].hist(p999s, bins=50, color='silver', edgecolor='black', linewidth=0.5, alpha=0.7)
-    ax[1, 1].set_title("Global 99.9th Percentile Distribution")
+    print(f"Loading patch: {os.path.basename(patch_path)}")
 
-    plt.tight_layout()
+    # 1. Load the 16-channel tensor
+    data = load_file(patch_path)["x"]
+
+    # 2. Extract the VV channels based on your generation script
+    # Shape of each slice: [2, 128, 128] (I and Q)
+    FA_true = data[0:2, :, :]
+    SA1 = data[4:6, :, :]
+    SA2 = data[8:10, :, :]
+    SA3 = data[12:14, :, :]
+
+    # 3. The Recombination (Element-wise addition)
+    SA_sum = SA1 + SA2 + SA3
+
+    # 4. Calculate the Errors
+    mse_error = F.mse_loss(SA_sum, FA_true)
+    mae_error = F.l1_loss(SA_sum, FA_true)
+
+    # Calculate relative error to give it physical context
+    fa_mean_energy = torch.mean(torch.abs(FA_true))
+    relative_error = mae_error / (fa_mean_energy + 1e-8) * 100
+
+    print("\n--- Linearity Test Results ---")
+    print(f"Mean Squared Error (MSE): {mse_error.item():.8e}")
+    print(f"Mean Absolute Error (MAE): {mae_error.item():.8e}")
+    print(f"Relative Error:            {relative_error.item():.6f}%")
+
+    # 5. The Verdict
+    if mse_error.item() < 1e-5:
+        print("\n✅ SUCCESS: The Fourier linearity holds perfectly.")
+        print("You can safely use element-wise addition in your PyTorch loss function!")
+    else:
+        print("\n❌ WARNING: Severe non-linearity detected.")
+        print("A windowing function or overlapping filters were likely applied during dataset creation.")
+
+
+def detect_polarimetric_reflectors(h5_file_path, min_sigma=7.0, min_scr=15.0, min_pol_ratio=5.0):
+    if not os.path.exists(h5_file_path):
+        return
+
+    print(f"Loading 1x resolution chunk: {os.path.basename(h5_file_path)}...")
+
+    with h5py.File(h5_file_path, 'r') as f:
+        # Load both polarizations
+        i_vv = f["bands"]["i_VV"][()].astype(np.float32)
+        q_vv = f["bands"]["q_VV"][()].astype(np.float32)
+
+        # Check if VH exists in this file
+        has_vh = "i_VH" in f["bands"]
+        if has_vh:
+            i_vh = f["bands"]["i_VH"][()].astype(np.float32)
+            q_vh = f["bands"]["q_VH"][()].astype(np.float32)
+        else:
+            print("WARNING: No VH polarization found. Skipping polarimetric filter.")
+
+    # Calculate Magnitudes
+    mag_vv = np.sqrt(np.square(i_vv) + np.square(q_vv))
+    active_pixels = mag_vv[mag_vv > 0]
+    if len(active_pixels) == 0: return
+
+    mean_vv, std_vv = np.mean(active_pixels), np.std(active_pixels)
+
+    # 1. Spatial Filters (SCR and Peak)
+    global_thresh = mean_vv + (min_sigma * std_vv)
+    is_bright = mag_vv > global_thresh
+    is_peak = maximum_filter(mag_vv, size=5) == mag_vv
+
+    w_out, w_in = 15, 5
+    sum_outer = uniform_filter(mag_vv, size=w_out) * (w_out ** 2)
+    sum_inner = uniform_filter(mag_vv, size=w_in) * (w_in ** 2)
+    clutter_mean = (sum_outer - sum_inner) / ((w_out ** 2) - (w_in ** 2))
+    clutter_mean[clutter_mean == 0] = 1e-6
+
+    scr_vv = mag_vv / clutter_mean
+    spatial_targets = is_bright & is_peak & (scr_vv > min_scr)
+
+    # 2. Polarimetric Filter (VV/VH Ratio)
+    if has_vh:
+        mag_vh = np.sqrt(np.square(i_vh) + np.square(q_vh))
+        # Prevent division by zero
+        mag_vh[mag_vh == 0] = 1e-6
+        pol_ratio = mag_vv / mag_vh
+
+        # Combine Spatial AND Polarimetric conditions
+        final_targets = spatial_targets & (pol_ratio > min_pol_ratio)
+    else:
+        final_targets = spatial_targets
+
+    y_coords, x_coords = np.where(final_targets)
+    print(f"Filtered down to {len(y_coords)} Polarimetric Corner Reflectors.")
+
+    # Render
+    vmax_disp = mean_vv + (4 * std_vv)
+    fig, ax = plt.subplots(figsize=(14, 14))
+    ax.imshow(np.clip(mag_vv, 0, vmax_disp), cmap='gray')
+
+    if len(x_coords) > 0:
+        ax.scatter(x_coords, y_coords, facecolors='none', edgecolors='red', s=120, linewidths=2.0)
+
+    title = f"Multi-Pol CR Detection\nFile: {os.path.basename(h5_file_path)}"
+    if has_vh: title += f" (SCR>{min_scr}, VV/VH>{min_pol_ratio})"
+    ax.set_title(title)
+    ax.axis('off')
+
+    save_filename = f"Surat_MultiPol_{os.path.basename(h5_file_path).replace('.h5', '.pdf')}"
+    plt.savefig(save_filename, bbox_inches='tight')
     plt.show()
-
-def inspect_dataset(config_path):
-    with open(config_path, "r") as f:
-        cfg = yaml.safe_load(f)
-
-    root_dir = cfg["data"]["root_dir"]
-    pols = cfg["data"]["subaperture_config"]["active_polarizations"]
-    looks = len(cfg["data"]["subaperture_config"]["input_indices"]) + \
-            len(cfg["data"]["subaperture_config"]["output_indices"])
-    sub_folder = f"sub_{looks}"
-
-    patch_ids = sorted([d for d in os.listdir(root_dir) if d.isdigit()])
-
-    all_patch_maxes = []
-    all_patch_999 = []
-
-    print(f"Inspecting {len(patch_ids)} patches in {sub_folder}...")
-
-    for pid in tqdm(patch_ids):
-        for pol in pols:
-            path = os.path.join(root_dir, pid, pol, sub_folder)
-            if not os.path.exists(path):
-                continue
-
-            data = np.array(zarr.open(path, mode='r')).astype(np.complex64)
-            mag = np.abs(data)
-
-            all_patch_maxes.append(np.max(mag))
-            all_patch_999.append(np.quantile(mag, 0.999))
-
-    all_patch_maxes = np.array(all_patch_maxes)
-    all_patch_999 = np.array(all_patch_999)
-
-    print("\n--- STATISTICAL REPORT ---")
-    print(f"Absolute Dataset Max:      {np.max(all_patch_maxes):.2f}")
-    print(f"Mean of Patch Maxes:       {np.mean(all_patch_maxes):.2f}")
-    print(f"99.9th Percentile (Global): {np.quantile(all_patch_999, 0.99):.2f} <--- RECOMMENDED GLOBAL_MAX")
-    print(f"95th Percentile (Global):   {np.quantile(all_patch_999, 0.95):.2f}")
-
-    bad_patch_idx = np.argmax(all_patch_maxes)
-    print(f"Extreme Outlier found in Patch: {patch_ids[bad_patch_idx // len(pols)]}")
-
-    plt.figure(figsize=(10, 5))
-    plt.hist(all_patch_999, bins=100, color='blue', alpha=0.7, label='99.9th Percentiles')
-    plt.axvline(np.quantile(all_patch_999, 0.99), color='red', linestyle='--', label='Suggested Scale')
-    plt.title("Distribution of High-Intensity Values Across All Patches")
-    plt.xlabel("Magnitude")
-    plt.ylabel("Frequency (Patches)")
-    plt.legend()
-    plt.yscale('log')
-    plt.show()
-
-
-def quarantine_bad_patches(config_path, quarantine_dir="./quarantine"):
-    with open(config_path, "r") as f:
-        cfg = yaml.safe_load(f)
-
-    root_dir = cfg["data"]["root_dir"]
-
-    if not os.path.exists(quarantine_dir):
-        os.makedirs(quarantine_dir)
-
-    patch_ids = sorted([d for d in os.listdir(root_dir) if d.isdigit()])
-    removed_count = 0
-
-    print(f"Scanning {len(patch_ids)} patches for NaNs/Infs...")
-    for pid in tqdm(patch_ids):
-        # We check 'sub_3' as it's the most common input
-        path = os.path.join(root_dir, pid, "vv", "sub_3")
-        if not os.path.exists(path): continue
-
-        try:
-            data = zarr.open(path, mode='r')[:]
-
-            if np.isnan(data).any() or np.isinf(data).any():
-                shutil.move(os.path.join(root_dir, pid), os.path.join(quarantine_dir, pid))
-                removed_count += 1
-        except Exception as e:
-            print(f"\nError reading patch {pid}: {e}")
-
-    print(f"\nCleanup complete. Moved {removed_count} corrupted patches to {quarantine_dir}.")
 
 
 if __name__ == "__main__":
-    # inspect_dataset("/shared/home/lvanderpeet/AE5822-Thesis/config.yaml")
-    config_path = "/shared/home/lvanderpeet/AE5822-Thesis/config.yaml"
-    root_dir = "/shared/home/lvanderpeet/AE5822-Thesis/data"
-    patch_id = "0003248"
-    pol = "vv"
-    sub_folder = "sub_3"
-    # plot_patch_dist(root_dir, patch_id, pol, sub_folder)
-    plot_patch(root_dir, patch_id, pol, sub_folder)
+    # ==========================================
+    # Main Execution Block
+    # Uncomment the function you want to run!
+    # ==========================================
 
-    # plot_global_stats(root_dir, pol, sub_folder)
+    DATASET_ROOT = "/shared/home/lvanderpeet/AE5822-Thesis/dataset_patches_128"
+    FULL_TILE_PATH = "/shared/home/lvanderpeet/AE5822-Thesis/dataset/S1C_S6_SLC__1SDV_20250417T084009_20250417T084038_001930_003C95_78FA/299D_1489R.h5"
+
+    # TEST_PATCH = "/shared/home/lvanderpeet/AE5822-Thesis/dataset_patches_128/S1A_S4_SLC__1SDV_20160629T224400_20160629T224425_011932_012621_65C3/512U_564L__2880_512.safetensors"
+    #
+    # test_subaperture_linearity(TEST_PATCH)
+
+    ## 1. ---- Inspect a single patch ----
+    # SAMPLE_PATCH = os.path.join(DATASET_ROOT, "S1A_S4_SLC__1SDV_20160629T224400_20160629T224425_011932_012621_65C3",
+    #                             "512U_564L__2880_512.safetensors")
+    # inspect_single_patch(SAMPLE_PATCH)
+
+    ## 2. ---- Reconstruct and Plot a FULL TILE ----
+    # plot_full_original_tile(FULL_TILE_PATH, downsample_factor=1)
+
+    ## 3. ---- Compute Global Statistics (Takes time) ----
+    # compute_dataset_statistics(DATASET_ROOT, n_jobs=16)
+    detect_polarimetric_reflectors(FULL_TILE_PATH)
