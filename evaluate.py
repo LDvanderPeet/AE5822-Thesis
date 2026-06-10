@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import csv
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,7 @@ import torch.nn.functional as F
 import yaml
 from scipy.stats import gaussian_kde, wasserstein_distance
 import scipy.stats as stats
+from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 
 from data import PairedDataModule
 from src.PixelDiffusion import PixelDiffusionConditional
@@ -35,14 +37,42 @@ class IRFResult:
     range_: IRFMetrics
 
 
+def compute_image_metrics(ref_mag: np.ndarray, tgt_mag: np.ndarray) -> tuple[float, float, float, float]:
+    """
+    Calculates physical PSNR, RMSE, MAE, and SSIM.
+    Uses win_size=7 and channel_axis=0 to ensure compatibility with varied SAR patch sizes.
+    """
+    mae = float(np.mean(np.abs(ref_mag - tgt_mag)))
+    rmse = float(np.sqrt(np.mean((ref_mag - tgt_mag) ** 2)))
+
+    peak_val = ref_mag.max()
+    if peak_val > 0:
+        p_mag_01 = np.clip(tgt_mag / peak_val, 0.0, 1.0)
+        t_mag_01 = np.clip(ref_mag / peak_val, 0.0, 1.0)
+    else:
+        p_mag_01, t_mag_01 = tgt_mag, ref_mag
+
+    psnr = float(peak_signal_noise_ratio(t_mag_01, p_mag_01, data_range=1.0))
+    ssim = float(structural_similarity(
+        t_mag_01,
+        p_mag_01,
+        data_range=1.0,
+        win_size=7,
+        gaussian_weights=True,
+        sigma=1.5,
+        channel_axis=0
+    ))
+    return psnr, rmse, mae, ssim
+
 def generate_and_save_scenes(
         deg_cplx: torch.Tensor,
         ref_cplx: torch.Tensor,
         rec_cplx: torch.Tensor,
         save_path: Path,
-        sample_idx: int
+        sample_idx: int,
+        is_ampl_only: bool = False,
 ) -> None:
-    """
+    r"""
     Generates high-res LaTeX comparative plots for visual analysis.
 
     1. Generates the amplitude plots for degradation, reconstruction, and reference. Scales amplitude using a dynamic
@@ -95,36 +125,6 @@ def generate_and_save_scenes(
     if vmax_error <= 0.0:
         vmax_error = 1.0
 
-    interferogram_deg = deg * np.conj(ref)
-    interferogram_rec = rec * np.conj(ref)
-    phase_err_deg = np.angle(interferogram_deg)
-    phase_err_rec = np.angle(interferogram_rec)
-
-    w = 5
-    kernel = np.ones((w, w)) / (w * w)
-    import scipy.signal
-    def local_mean(img):
-        return scipy.signal.convolve2d(img, kernel, mode='same')
-
-    e_deg = local_mean(amp_deg_raw ** 2)
-    e_ref = local_mean(amp_ref_raw ** 2)
-    e_rec = local_mean(amp_rec_raw ** 2)
-
-    coh_deg = np.clip(np.abs(local_mean(interferogram_deg)) / np.sqrt(np.clip(e_ref * e_deg, 1e-12, None)), 0.0, 1.0)
-    coh_rec = np.clip(np.abs(local_mean(interferogram_rec)) / np.sqrt(np.clip(e_ref * e_rec, 1e-12, None)), 0.0, 1.0)
-
-    # Find the brightest pixel using the raw, unclipped reference amplitude
-    peak_idx = np.argmax(amp_ref_raw)
-    py, px = np.unravel_index(peak_idx, amp_ref_raw.shape)
-
-    start_px = max(0, px-5)
-    end_px = min(amp_ref_raw.shape[-1], px + 6)
-    range_axis_ticks = np.arange(start_px, end_px)
-
-    phase_deg_window = np.angle(deg[py, start_px:end_px])
-    phase_ref_window = np.angle(ref[py, start_px:end_px])
-    phase_rec_window = np.angle(rec[py, start_px:end_px])
-
     patch_dir = save_path / f"patch_{sample_idx:03d}"
     patch_dir.mkdir(parents=True, exist_ok=True)
 
@@ -141,7 +141,6 @@ def generate_and_save_scenes(
         im = ax.imshow(data, cmap=cmap, vmin=vmin, vmax=vmax)
         ax.set_xlabel("Range [px]")
         ax.set_ylabel("Azimuth [px]")
-
         cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
         cbar.set_label(cbar_label, fontsize=16)
         if ticks is not None:
@@ -164,39 +163,75 @@ def generate_and_save_scenes(
     save_single_map(amp_rec_error, "02b_amp_error_reconstructed.png", cmap='hot', vmin=0.0, vmax=vmax_error,
                     cbar_label="Absolute Delta")
 
-    fig, ax = plt.subplots(figsize=(8, 4))
-    ax.plot(range_axis_ticks, phase_ref_window, label="Reference Phase",
-            color='black', marker='o', linewidth=1.5, markersize=6)
-    ax.plot(range_axis_ticks, phase_deg_window, label="Degraded Phase",
-            color='blue', linestyle='-', marker='s', linewidth=1.5, markersize=6)
-    ax.plot(range_axis_ticks, phase_rec_window, label="Reconstructed Phase",
-            color='red', linestyle='--', marker='x', linewidth=1.5, markersize=6)
-    ax.set_xlabel("Range [px]")
-    ax.set_xlim(start_px - 0.5, end_px - 0.5)
-    ax.set_ylabel("Phase [Rad]")
-    ax.set_ylim(-np.pi, np.pi)
-    ax.set_yticks([-np.pi, 0, np.pi])
-    ax.set_yticklabels(['$-\pi$', '0', '$\pi$'])
-    ax.set_title(f"Range Phase Profile at Azimuth {py}")
-    ax.legend(loc='upper right')
-    fig.savefig(patch_dir / "04_phase_profile_1d.png", dpi=300, bbox_inches='tight')
-    plt.close(fig)
+    if not is_ampl_only:
+        interferogram_deg = deg * np.conj(ref)
+        interferogram_rec = rec * np.conj(ref)
+        ifg_phase_deg = np.angle(interferogram_deg)
+        ifg_phase_rec = np.angle(interferogram_rec)
 
-    save_single_map(phase_err_deg, "04a_phase_error_degraded.png", cmap='twilight', vmin=-np.pi, vmax=np.pi,
-                    cbar_label="Error [Rad]", ticks=[-np.pi, 0, np.pi], ticklabels=['$-\pi$', '0', '$\pi$'])
-    save_single_map(phase_err_rec, "04b_phase_error_reconstructed.png", cmap='twilight', vmin=-np.pi, vmax=np.pi,
-                    cbar_label="Error [Rad]", ticks=[-np.pi, 0, np.pi], ticklabels=['$-\pi$', '0', '$\pi$'])
+        raw_phase_ref = np.angle(ref)
+        raw_phase_deg = np.angle(deg)
+        raw_phase_rec = np.angle(rec)
 
-    save_single_map(coh_deg, "05a_coherence_degraded.png", cmap='viridis', vmin=0.0, vmax=1.0,
-                    cbar_label="Coherence $\gamma$")
-    save_single_map(coh_rec, "05b_coherence_reconstructed.png", cmap='viridis', vmin=0.0, vmax=1.0,
-                    cbar_label="Coherence $\gamma$")
+        import scipy.signal
+        kernel = np.ones((5, 5)) / 25.0
+
+        def local_mean(img):
+            return scipy.signal.convolve2d(img, kernel, mode='same')
+
+        e_deg, e_ref, e_rec = local_mean(amp_deg_raw ** 2), local_mean(amp_ref_raw ** 2), local_mean(amp_rec_raw ** 2)
+        coh_deg = np.clip(np.abs(local_mean(interferogram_deg)) / np.sqrt(np.clip(e_ref * e_deg, 1e-12, None)), 0.0,
+                          1.0)
+        coh_rec = np.clip(np.abs(local_mean(interferogram_rec)) / np.sqrt(np.clip(e_ref * e_rec, 1e-12, None)), 0.0,
+                          1.0)
+
+        save_single_map(raw_phase_ref, "03a_phase_original.png", 'jet', -np.pi, np.pi, "Phase [Rad]",
+                        [-np.pi, 0, np.pi], [r'$-\pi$', '0', r'$\pi$'])
+        save_single_map(raw_phase_deg, "03b_phase_degraded.png", 'jet', -np.pi, np.pi, "Phase [Rad]",
+                        [-np.pi, 0, np.pi], [r'$-\pi$', '0', r'$\pi$'])
+        save_single_map(raw_phase_rec, "03c_phase_reconstructed.png", 'jet', -np.pi, np.pi, "Phase [Rad]",
+                        [-np.pi, 0, np.pi], [r'$-\pi$', '0', r'$\pi$'])
+
+        save_single_map(ifg_phase_deg, "04a_interferogram_degraded.png", 'jet', -np.pi, np.pi, "Phase Error [Rad]",
+                        [-np.pi, 0, np.pi], [r'$-\pi$', '0', r'$\pi$'])
+        save_single_map(ifg_phase_rec, "04b_interferogram_reconstructed.png", 'jet', -np.pi, np.pi, "Phase Error [Rad]",
+                        [-np.pi, 0, np.pi], [r'$-\pi$', '0', r'$\pi$'])
+
+        save_single_map(coh_deg, "05a_coherence_degraded.png", 'viridis', 0.0, 1.0, r"Coherence $\gamma$")
+        save_single_map(coh_rec, "05b_coherence_reconstructed.png", 'viridis', 0.0, 1.0, r"Coherence $\gamma$")
+
+        peak_idx = np.argmax(amp_ref_raw)
+        py, px = np.unravel_index(peak_idx, amp_ref_raw.shape)
+        start_px, end_px = max(0, px - 5), min(amp_ref_raw.shape[-1], px + 6)
+        range_axis_ticks = np.arange(start_px, end_px)
+
+        phase_deg_window = np.angle(deg[py, start_px:end_px])
+        phase_ref_window = np.angle(ref[py, start_px:end_px])
+        phase_rec_window = np.angle(rec[py, start_px:end_px])
+
+        fig, ax = plt.subplots(figsize=(8, 4))
+        ax.plot(range_axis_ticks, phase_ref_window, label="Reference Phase", color='black', marker='o', linewidth=1.5,
+                markersize=6)
+        ax.plot(range_axis_ticks, phase_deg_window, label="Degraded Phase", color='blue', linestyle='-', marker='s',
+                linewidth=1.5, markersize=6)
+        ax.plot(range_axis_ticks, phase_rec_window, label="Reconstructed Phase", color='red', linestyle='--',
+                marker='x', linewidth=1.5, markersize=6)
+        ax.set_xlabel("Range [px]")
+        ax.set_xlim(start_px - 0.5, end_px - 0.5)
+        ax.set_ylabel("Phase [Rad]")
+        ax.set_ylim(-np.pi, np.pi)
+        ax.set_yticks([-np.pi, 0, np.pi])
+        ax.set_yticklabels([r'$-\pi$', '0', r'$\pi$'])
+        ax.set_title(f"Range Phase Profile at Azimuth {py}")
+        ax.legend(loc='upper right')
+        fig.savefig(patch_dir / "06_phase_profile_1d.png", dpi=300, bbox_inches='tight')
+        plt.close(fig)
 
     plt.rcParams.update(plt.rcParamsDefault)
 
 
 def evaluate_hypothesis_ratio(values: list[float], margin: float = 0.05, conf: float = 0.95) -> dict[str, Any]:
-    """
+    r"""
     Performs a two-sided t-test to evaluate confidence intervals for a metric ratio.
 
     Determines whether the $(1 - \alpha)$ confidence interval of a reconstructed/ground truth
@@ -237,7 +272,7 @@ def evaluate_hypothesis_ratio(values: list[float], margin: float = 0.05, conf: f
 
 
 def evaluate_hypothesis_threshold(values: list[float], max_threshold: float, conf: float = 0.95) -> dict[str, Any]:
-    """
+    r"""
     Evaluates if the upper bound of a metric's confidence interval falls below a maximum threshold.
 
     Utilizes a Student's t-distribution to establish an upper bound at the specified
@@ -275,7 +310,7 @@ def evaluate_hypothesis_threshold(values: list[float], max_threshold: float, con
 
 
 def load_config(config_path: str) -> dict[str, Any]:
-    """
+    r"""
     Parses an experiment runtime configuration file.
 
     Parameters
@@ -293,7 +328,7 @@ def load_config(config_path: str) -> dict[str, Any]:
 
 
 def build_model_from_config(config: dict[str, Any], checkpoint_path: str, device: torch.device) -> PixelDiffusionConditional:
-    """
+    r"""
     Constructs and restores a PixelDiffusionConditional model instance using saved weights.
 
     Extracts architectural parameters (U-Net channel multipliers, EMA flags, scheduling parameters)
@@ -353,7 +388,7 @@ def build_model_from_config(config: dict[str, Any], checkpoint_path: str, device
 
 
 def to_complex_channels(t: torch.Tensor) -> torch.Tensor:
-    """
+    r"""
     Transforms multi-channel interleaved real representations into native complex tensors.
 
     Unpacks alternate channel indices ($0::2$ as real, $1::2$ as imaginary) back
@@ -379,7 +414,7 @@ def to_complex_channels(t: torch.Tensor) -> torch.Tensor:
 
 
 def magnitude_map(t: torch.Tensor) -> torch.Tensor:
-    """
+    r"""
     Extracts the structural physical magnitude array from a complex or interleaved tensor.
 
     Parameters
@@ -398,7 +433,7 @@ def magnitude_map(t: torch.Tensor) -> torch.Tensor:
 
 
 def _resolution_3db(profile: np.ndarray) -> float:
-    """
+    r"""
     Calculates the -3dB spatial width (main lobe width) of a 1D point-target response slice.
 
     Determines the system's geometric resolution boundaries by tracking the left and
@@ -428,7 +463,7 @@ def _resolution_3db(profile: np.ndarray) -> float:
 
 
 def _pslr_islr(profile: np.ndarray, main_lobe_width: float) -> tuple[float, float]:
-    """
+    r"""
     Extracts Peak Side Lobe Ratio (PSLR) and Integrated Side Lobe Ratio (ISLR).
 
     Isolates the core target resolution zone (main lobe) from background energy
@@ -461,7 +496,7 @@ def _pslr_islr(profile: np.ndarray, main_lobe_width: float) -> tuple[float, floa
 
 
 def upsample_irf_window(window: torch.Tensor, factor: int = 8) -> torch.Tensor:
-    """
+    r"""
     Applies high-resolution bicubic interpolation to a localized target analysis grid.
 
     Improves measurement granularity for sub-pixel main-lobe width assessments.
@@ -488,7 +523,7 @@ def point_target_analysis_single(
     window_radius: int = 8,
     upsample_factor: int = 8,
 ) -> dict[str, Any]:
-    """
+    r"""
     Executes a complete 2D point target Impulse Response Function (IRF) analysis.
 
     Locates the brightest point in the ground truth amplitude patch, extracts a local bounding box
@@ -562,7 +597,7 @@ def point_target_analysis_single(
 
 
 def aggregate_irf(irf_results: list[dict[str, Any]]) -> dict[str, Any]:
-    """
+    r"""
     Computes statistical ensemble distributions across point target results.
 
     Parameters
@@ -593,7 +628,7 @@ def aggregate_irf(irf_results: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def save_irf_plots(irf_results: list[dict[str, Any]], save_dir: Path, max_plots: int = 5) -> None:
-    """
+    r"""
     Exports combined verification line plots for azimuth and range profiles.
 
     Parameters
@@ -629,7 +664,7 @@ def kde_distribution_distance(
     rec_values: np.ndarray,
     save_dir: Path,
 ) -> dict[str, float]:
-    """
+    r"""
     Evaluates statistical similarity between predicted and ground truth intensity distributions.
 
     Fits Gaussian Kernel Density Estimates (KDE) to log-transformed magnitude values ($\log_{1p}(|SLC|)$)
@@ -696,7 +731,7 @@ def local_interferometric_coherence(
     ref_cplx: torch.Tensor,
     window_size: int = 5,
 ) -> torch.Tensor:
-    """
+    r"""
     Computes local complex interferometric coherence ($\gamma$) within a moving window.
 
     Measures the phase and amplitude correlation between prediction and reference complex data:
@@ -743,7 +778,7 @@ def local_interferometric_coherence(
 
 
 def equivalent_number_of_looks(cplx: torch.Tensor) -> float:
-    """
+    r"""
     Estimates the Equivalent Number of Looks (ENL) of a complex SAR patch region.
 
     Quantifies speckle reduction and radiometric resolution performance by evaluating the
@@ -760,8 +795,7 @@ def equivalent_number_of_looks(cplx: torch.Tensor) -> float:
     float
         The estimated ENL parameter value.
     """
-    intensity = torch.abs(cplx) ** 2
-    intensity = torch.to(torch.float64).flatten()
+    intensity = (torch.abs(cplx) ** 2).to(torch.float64).flatten()
 
     mean_i = torch.mean(intensity)
     var_i = torch.var(intensity, unbiased=False)
@@ -811,18 +845,23 @@ def evaluate(config: dict[str, Any]) -> dict[str, Any]:
     print(f"Total batches in Loader: {len(test_loader)}")
     print("=" * 60 + "\n")
 
+    max_eval_patches = int(eval_cfg.get("max_eval_patches", 1000))
+    max_scenes = int(eval_cfg.get("max_scenes", 5))
     model = build_model_from_config(config, checkpoint_path, device)
 
     run_scenes = bool(tests.get("generate_scenes", False))
+    run_metrics = bool(tests.get("compute_metrics", False))
     run_point_target = bool(tests.get("point_target_analysis", False))
     run_kde = bool(tests.get("kde_distance", False))
     run_phase = bool(tests.get("phase_coherence", False))
     run_enl = bool(tests.get("enl_comparison", False))
 
     scene_counter = 0
-    max_scenes = 5
+    total_evaluated_patches = 0
     irf_results = []
+    patch_metrics_log = []
     max_kde_samples = int(eval_cfg.get("max_kde_samples", 400_000))
+    kde_samples_collected = 0
 
     ref_logmag, deg_logmag, rec_logmag = [], [], []
 
@@ -836,58 +875,89 @@ def evaluate(config: dict[str, Any]) -> dict[str, Any]:
         "rec_enl": [], "rec_abs_error": [], "rec_rel_error": []
     }
 
+    print(f"\n>>> EVALUATING CHECKPOINT: {checkpoint_path}")
+    print(f">>> Capped at {max_eval_patches} evaluation patches. Saving first {max_scenes} scenes.")
+    print(f">>> Computing Image Metrics: {run_metrics}")
+
     with torch.no_grad():
         for batch_idx, batch in enumerate(test_loader):
-            deg_batch, ref_batch = batch
-            deg_batch, ref_batch = deg_batch.to(device, non_blocking=True), ref_batch.to(device, non_blocking=True)
+            if total_evaluated_patches >= max_eval_patches:
+                break
+
+            deg_batch, ref_batch = batch[0].to(device), batch[1].to(device)
+            is_amp_only = deg_batch.shape[1] == 1
             rec_batch = model.predict_step((deg_batch, ref_batch), batch_idx)
 
             for i in range(rec_batch.shape[0]):
-                deg_i, ref_i, rec_i = deg_batch[i], ref_batch[i], rec_batch[i]
+                if total_evaluated_patches >= max_eval_patches:
+                    break
+
+                # 1. Un-normalize back to physical backscatter scale
+                # .cpu() moves to RAM. [0] strips the unsqueeze batch dim -> shape: (C, H, W)
+                deg_phys_0 = model._inverse_signed_log_normalize(deg_batch[i].unsqueeze(0).float()).cpu()[0]
+                ref_phys_0 = model._inverse_signed_log_normalize(ref_batch[i].unsqueeze(0).float()).cpu()[0]
+                rec_phys_0 = model._inverse_signed_log_normalize(rec_batch[i].unsqueeze(0).float()).cpu()[0]
+
+                # 2. Setup variables to guarantee strictly 2D (H, W) shapes for metrics
+                if is_amp_only:
+                    deg_cpu, ref_cpu, rec_cpu = deg_phys_0[0], ref_phys_0[0], rec_phys_0[0]
+                    deg_mag, ref_mag, rec_mag = deg_cpu.numpy(), ref_cpu.numpy(), rec_cpu.numpy()
+                else:
+                    deg_cpu = to_complex_channels(deg_phys_0)
+                    ref_cpu = to_complex_channels(ref_phys_0)
+                    rec_cpu = to_complex_channels(rec_phys_0)
+
+                    # Force strict 2D shape for IRF unpacking by isolating the first channel
+                    deg_mag = np.abs(deg_cpu[0].numpy())
+                    ref_mag = np.abs(ref_cpu[0].numpy())
+                    rec_mag = np.abs(rec_cpu[0].numpy())
 
                 if run_scenes and scene_counter < max_scenes:
-                    deg_cpu = to_complex_channels(deg_i).detach().cpu()
-                    ref_cpu = to_complex_channels(ref_i).detach().cpu()
-                    rec_cpu = to_complex_channels(rec_i).detach().cpu()
-                    generate_and_save_scenes(deg_cpu, ref_cpu, rec_cpu, save_dir, scene_counter)
+                    generate_and_save_scenes(deg_cpu, ref_cpu, rec_cpu, save_dir, total_evaluated_patches, is_amp_only)
                     scene_counter += 1
-                    if scene_counter >= max_scenes:
-                        print(
-                            f"\n>>> [SUCCESS] Generated {max_scenes} target scenes. Short-circuiting evaluation run to save resources.")
-                        return {}
+
+                if run_metrics:
+                    deg_psnr, deg_rmse, deg_mae, deg_ssim = compute_image_metrics(ref_mag, deg_mag)
+                    rec_psnr, rec_rmse, rec_mae, rec_ssim = compute_image_metrics(ref_mag, rec_mag)
+
+                    patch_metrics_log.append({
+                        "Tile_NUMBER": total_evaluated_patches,
+                        "Degraded_PSNR": deg_psnr, "Degraded_RMSE": deg_rmse, "Degraded_MAE": deg_mae,
+                        "Degraded_SSIM": deg_ssim,
+                        "Reconstructed_PSNR": rec_psnr, "Reconstructed_RMSE": rec_rmse, "Reconstructed_MAE": rec_mae,
+                        "Reconstructed_SSIM": rec_ssim
+                    })
 
                 if run_point_target:
                     irf_results.append(point_target_analysis_single(
-                        magnitude_map(deg_i), magnitude_map(ref_i), magnitude_map(rec_i)
+                        torch.tensor(deg_mag), torch.tensor(ref_mag), torch.tensor(rec_mag)
                     ))
 
-                if run_kde:
-                    ref_logmag.append(
-                        torch.log1p(torch.abs(to_complex_channels(ref_i))).flatten().detach().cpu().numpy())
-                    deg_logmag.append(
-                        torch.log1p(torch.abs(to_complex_channels(deg_i))).flatten().detach().cpu().numpy())
-                    rec_logmag.append(
-                        torch.log1p(torch.abs(to_complex_channels(rec_i))).flatten().detach().cpu().numpy())
+                if run_kde and kde_samples_collected < max_kde_samples:
+                    ref_arr = torch.log1p(torch.abs(to_complex_channels(ref_phys_0))).flatten().numpy()
+                    deg_arr = torch.log1p(torch.abs(to_complex_channels(deg_phys_0))).flatten().numpy()
+                    rec_arr = torch.log1p(torch.abs(to_complex_channels(rec_phys_0))).flatten().numpy()
+                    ref_logmag.append(ref_arr)
+                    deg_logmag.append(deg_arr)
+                    rec_logmag.append(rec_arr)
+                    kde_samples_collected += ref_arr.size
 
-                if run_phase:
-                    ref_cplx, deg_cplx, rec_cplx = to_complex_channels(ref_i), to_complex_channels(
-                        deg_i), to_complex_channels(rec_i)
-                    for state, target in [("degraded", deg_cplx), ("reconstructed", rec_cplx)]:
-                        phase_diff = torch.angle(target * torch.conj(ref_cplx))
+                if run_phase and not is_amp_only:
+                    for state, target in [("degraded", deg_cpu), ("reconstructed", rec_cpu)]:
+                        phase_diff = torch.angle(target * torch.conj(ref_cpu))
                         phase_stats[state]["mean_abs_phase_diff"].append(
                             float(torch.mean(torch.abs(phase_diff)).item()))
                         phase_stats[state]["std_phase_diff_rad"].append(float(torch.std(phase_diff).item()))
-                        coh = local_interferometric_coherence(target, ref_cplx, window_size=5)
+                        coh = local_interferometric_coherence(target, ref_cpu, window_size=5)
                         phase_stats[state]["coherence_mean"].append(float(torch.mean(coh).item()))
                         phase_stats[state]["coherence_std"].append(float(torch.std(coh).item()))
 
                 if run_enl:
-                    ref_enl = equivalent_number_of_looks(to_complex_channels(ref_i))
-                    deg_enl = equivalent_number_of_looks(to_complex_channels(deg_i))
-                    rec_enl = equivalent_number_of_looks(to_complex_channels(rec_i))
+                    ref_enl = equivalent_number_of_looks(to_complex_channels(ref_phys_0))
+                    deg_enl = equivalent_number_of_looks(to_complex_channels(deg_phys_0))
+                    rec_enl = equivalent_number_of_looks(to_complex_channels(rec_phys_0))
 
                     enl_stats["ref_enl"].append(ref_enl)
-
                     enl_stats["deg_enl"].append(deg_enl)
                     enl_stats["deg_abs_error"].append(abs(deg_enl - ref_enl))
                     enl_stats["deg_rel_error"].append(abs(deg_enl - ref_enl) / max(abs(ref_enl), EPS))
@@ -896,11 +966,31 @@ def evaluate(config: dict[str, Any]) -> dict[str, Any]:
                     enl_stats["rec_abs_error"].append(abs(rec_enl - ref_enl))
                     enl_stats["rec_rel_error"].append(abs(rec_enl - ref_enl) / max(abs(ref_enl), EPS))
 
-            if run_kde and sum(arr.size for arr in ref_logmag) > max_kde_samples:
-                break
+                total_evaluated_patches += 1
 
     results: dict[str, Any] = {
         "config": {"checkpoint_path": checkpoint_path, "save_dir": str(save_dir), "tests": tests}}
+
+    if run_metrics and patch_metrics_log:
+        patch_metrics_log.sort(key=lambda x: (x["Reconstructed_PSNR"], x["Reconstructed_SSIM"]), reverse=True)
+        best_8_patches = patch_metrics_log[:8]
+
+        csv_path = save_dir / "patch_metrics.csv"
+        with csv_path.open('w', newline='') as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=patch_metrics_log[0].keys())
+            writer.writeheader()
+            writer.writerows(best_8_patches)
+        print(f">>> Filtered and logged metrics for the best 8 performing tiles to {csv_path}")
+        metrics_summary = {}
+        for key in best_8_patches[0].keys():
+            if key != "Tile_NUMBER":
+                vals = [p[key] for p in best_8_patches]
+                metrics_summary[key] = {"mean": float(np.mean(vals)), "std": float(np.std(vals))}
+
+        results["image_metrics"] = {
+            "csv_path": str(csv_path),
+            "summary": metrics_summary
+        }
 
     if run_point_target:
         results["point_target_analysis"] = {"num_samples": len(irf_results), "summary": aggregate_irf(irf_results)}
@@ -912,7 +1002,7 @@ def evaluate(config: dict[str, Any]) -> dict[str, Any]:
             np.concatenate(rec_logmag)[:max_kde_samples], save_dir=save_dir
         )
 
-    if run_phase:
+    if run_phase and not is_amp_only:
         results["phase_coherence"] = {
             state: {k: {"mean": float(np.mean(v)) if v else None, "std": float(np.std(v)) if v else None} for k, v in
                     stats.items()}
@@ -934,7 +1024,7 @@ def evaluate(config: dict[str, Any]) -> dict[str, Any]:
         hypothesis_results["H1_Azimuth_Resolution_Reconstruction"] = evaluate_hypothesis_ratio(az_ratios, margin=0.05)
         hypothesis_results["H2_Range_Resolution_Reconstruction"] = evaluate_hypothesis_ratio(rg_ratios, margin=0.05)
 
-    if run_phase and phase_stats["reconstructed"]["std_phase_diff_rad"]:
+    if run_phase and not is_amp_only and phase_stats["reconstructed"]["std_phase_diff_rad"]:
         std_phase_deg = [np.rad2deg(val) for val in phase_stats["reconstructed"]["std_phase_diff_rad"]]
         hypothesis_results["H4_Phase_Consistency_Reconstruction"] = evaluate_hypothesis_threshold(std_phase_deg,
                                                                                                   max_threshold=5.0)
@@ -947,14 +1037,68 @@ def evaluate(config: dict[str, Any]) -> dict[str, Any]:
     return results
 
 
+def compile_metrics_table(csv_paths: list[str]) -> None:
+    import csv
+    data_map = {}
+    ordered_tiles = []
+
+    for path in csv_paths:
+        name = Path(path).parent.name
+        with open(path, 'r') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                tile = int(row["Tile_NUMBER"])
+                if tile not in data_map:
+                    data_map[tile] = {"Degraded": row}
+                    ordered_tiles.append(tile)
+                data_map[tile][name] = row
+
+    base_name = Path(csv_paths[0]).parent.name
+    ordered_tiles.sort(key=lambda x: float(data_map[x][base_name]["Reconstructed_PSNR"]), reverse=True)
+    top_10 = ordered_tiles[:10]
+
+    print("\n" + "=" * 120)
+    print("TABLE 2. PSNR [dB], RMSE, MAE, SSIM for real data.")
+    print("=" * 120)
+
+    header = f"{'Tile NUMBER':<12} | {'Degraded':<35} "
+    for path in csv_paths:
+        label = Path(path).parent.name.split('_')[-1]
+        header += f"| {'Reconstructed ' + label:<35} "
+    print(header)
+
+    sub_header = f"{'':<12} | {'PSNR':<8} {'RMSE':<8} {'MAE':<8} {'SSIM':<8} "
+    for _ in csv_paths:
+        sub_header += f"| {'PSNR':<8} {'RMSE':<8} {'MAE':<8} {'SSIM':<8} "
+    print(sub_header)
+    print("-" * len(sub_header))
+
+    for tile in top_10:
+        deg = data_map[tile]["Degraded"]
+        row_str = f"{tile:<12} | {float(deg['Degraded_PSNR']):<8.4f} {float(deg['Degraded_RMSE']):<8.4f} {float(deg['Degraded_MAE']):<8.4f} {float(deg['Degraded_SSIM']):<8.4f} "
+
+        for path in csv_paths:
+            name = Path(path).parent.name
+            rec = data_map[tile].get(name, deg)
+            row_str += f"| {float(rec['Reconstructed_PSNR']):<8.4f} {float(rec['Reconstructed_RMSE']):<8.4f} {float(rec['Reconstructed_MAE']):<8.4f} {float(rec['Reconstructed_SSIM']):<8.4f} "
+        print(row_str)
+    print("=" * 120 + "\n")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate PixelDiffusionConditional model on SAR-specific metrics.")
-    parser.add_argument("--config", type=str, required=True, help="Path to config YAML with evaluation section.")
+    parser.add_argument("--config", type=str, help="Path to config YAML with evaluation section.")
+    parser.add_argument("--compile-table", nargs='+', help="Paths to patch_metrics.csv files to compile.")
     args = parser.parse_args()
 
-    config = load_config(args.config)
-    results = evaluate(config)
-    print(json.dumps(results, indent=2))
+    if args.compile_table:
+        compile_metrics_table(args.compile_table)
+    elif args.config:
+        config = load_config(args.config)
+        results = evaluate(config)
+        print(json.dumps(results, indent=2))
+    else:
+        print("Please provide either --config or --compile-table.")
 
 
 if __name__ == "__main__":

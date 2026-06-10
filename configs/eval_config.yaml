@@ -5,7 +5,7 @@ data:
   batch_size: 1  # Can be adjusted based on GPU memory
   num_workers: 0
   subaperture_config:
-    input_indices: [2]  # Your 85% bandwidth track
+    input_indices: [4]
     output_indices: [0]
     active_polarizations: ["VV"]
   split:
@@ -42,11 +42,14 @@ model:
     dropout: 0.1 # Fraction of neurons turned off per epoch to prevent overfitting.
 
 evaluation:
-  checkpoint_path: "/shared/home/lvanderpeet/AE5822-Thesis/checkpoints/20260528-1325-diffusion_ASR_refinement/refine-010-0.8559.ckpt"
-  save_dir: "evaluation_results/75pct_sanity"
+  checkpoint_path: "/shared/home/lvanderpeet/AE5822-Thesis/checkpoints/20260604-1327-diffusion_ASR_50pct/refine-011-0.7034.ckpt"
+  save_dir: "evaluation_results/test_pipeline_50pct_v3"
+  max_eval_patches: 1000
+  max_scenes: 5
   tests:
     generate_scenes: True
-    point_target_analysis: False
-    kde_distance: False
-    phase_coherence: False
-    enl_comparison: False
+    compute_metrics: true
+    point_target_analysis: True
+    kde_distance: True
+    phase_coherence: True
+    enl_comparison: True
