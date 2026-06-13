@@ -1,279 +1,436 @@
-# Conditional Pixel Diffusion for SAR Subaperture Reconstruction
+# DiffASR: a Diffusion Mode for Synthetic Aperture Radar Super-Resolution
 
-This repository contains a PyTorch Lightning training pipeline for **conditional pixel-space diffusion** on SAR subaperture data, using:
-- `PixelDiffusion` as the Lightning model
-- `DenoisingDiffusionProcess` internals for the diffusion model
-- `dataset/` containing the raw full aperture (FA) and subaperture (SA) data
-- `train.py` as the Pytorch Lightning training pipeline for conditional pixel-space diffusion on SAR subaperture data
-
-At a high level, the model learns to map: 
-- **condition input** `x`: retained subaperture channels
-- to **target output** `y`: the original full aperture
+This repository contains a PyTorch Lightning training pipeline for **conditional pixel-space diffusion** on 
+complex-valued SAR data. The azimuth super-resolution task is formulated as:
+```text
+condition x: reduced-bandwidth complex SAR patch
+target y:    higher-bandwidth complex SAR patch, usually the 100% reference
+```
 
 using a conditional denoising diffusion process with a configurable U-Net backbone.
 
---- 
-## Current State (April 2026)
+The model learns to recover the 100% bandwidth image from lower-bandwidth versions produced by azimuth/Doppler low-pass 
+filtering. Complex SLC data is represented with interleaved real and imaginary channels, so both amplitude and phase are
+available to the model and to the evaluation metrics.
 
-### What is implemented:
-- End-to-end training with PyTorch Lightning (`train.py`).
-- Config-driven setup for data/model/trainer (`configs/config.yaml`).
-- Conditional diffusion model (`src/PixelDiffusion.py`) with:
-  - configurable noise schedule (`linear` or `cosine`),
-  - selectable loss (`mse`, `mae`, or hybrid MS-SSIM + base loss),
-  - optional EMA shadow model for evaluation logging.
-- SAR data backend via `SafetensorSARDataset` wrapped by `PairedImageDataset`.
-- Validation-time reconstruction metrics/logging:
-  - `val_loss`,
-  - `val_recon_psnr`, `val_recon_ssim`, `val_recon_l1`, `val_recon_phase_coherence`, `val_recon_phase_error`,
-  - first-validation-target histograms: `val/hist_real`, `val/hist_imag`, `val/hist_magnitude`,
-  - - first-validation-image magnitude KDE overlay in dB: `val/magnitude_kde_db`,
-  - optional EMA versions of reconstruction metrics when EMA is enabled.
-- Separate evaluation script (`evaluate.py`) for SAR-focused analyses (IRF, KDE distance, phase coherence, etc.).
+The active training stack supports two model families:
+
+- `PixelDiffusionConditional`: conditional DDPM-style pixel diffusion with a
+  ConvNeXt U-Net backbone.
+- `DC2SCNLightning`: deterministic DC2SCN-style baseline with dense dilated
+  convolution blocks and a phase-aware physical loss.
+
+The main entry points are:
+
+- `data/patch_generation.py`: convert H5 SLC files into 20-channel
+  `.safetensors` patches containing all bandwidth levels.
+- `train.py`: train either the diffusion model or the DC2SCN baseline.
+- `evaluate.py`: run offline SAR-focused evaluation on a saved checkpoint.
+- `configs/config.yaml`: central runtime configuration.
+--- 
+
+## Important Terminology Change
+
+Older code and logs still use names such as `subaperture_config`, `FA`, and
+`SA1` because the project originally targeted subaperture reconstruction. In the
+current super-resolution formulation, those names should be interpreted as
+bandwidth levels.
+
+The dataset index mapping is now:
+
+| Logical index | Bandwidth represented | Historical label that may appear in code/logs |
+| --- | ---: | --- |
+| `0` | `100%` | `FA` |
+| `1` | `87.5%` | `SA1` |
+| `2` | `75%` | `SA2` |
+| `3` | `62.5%` | `SA3` |
+| `4` | `50%` | `SA4` |
+
+For example, the active config currently contains:
+
+```yaml
+data:
+  subaperture_config:
+    input_indices: [2]
+    output_indices: [0]
+    active_polarizations: ["VV"]
+```
+
+That means:
+
+```text
+input x  = 75% bandwidth VV complex patch
+target y = 100% bandwidth VV complex patch
+```
+
+If W&B or validation plots label the input as `SA2`, read that label as
+`75% bandwidth`. If the target is labeled `FA`, read it as `100% bandwidth`.
+
+--- 
+
+# SAR Bandwidth Super-Resolution Framework
+
+This repository contains a PyTorch Lightning framework for complex-valued SAR
+bandwidth super-resolution. The current task is no longer a full-aperture /
+subaperture reconstruction problem. It is now formulated as:
+
+```text
+condition x: reduced-bandwidth complex SAR patch
+target y:    higher-bandwidth complex SAR patch, usually the 100% reference
+```
+
+The model learns to recover the 100% bandwidth image from lower-bandwidth
+versions produced by azimuth/Doppler low-pass filtering. Complex SLC data is
+represented with interleaved real and imaginary channels, so both amplitude and
+phase are available to the model and to the evaluation metrics.
+
+The active training stack supports two model families:
+
+- `PixelDiffusionConditional`: conditional DDPM-style pixel diffusion with a
+  ConvNeXt U-Net backbone.
+- `DC2SCNLightning`: deterministic DC2SCN-style baseline with dense dilated
+  convolution blocks and a phase-aware physical loss.
+
+The main entry points are:
+
+- `data/patch_generation.py`: convert H5 SLC files into 20-channel
+  `.safetensors` patches containing all bandwidth levels.
+- `train.py`: train either the diffusion model or the DC2SCN baseline.
+- `evaluate.py`: run offline SAR-focused evaluation on a saved checkpoint.
+- `configs/config.yaml`: central runtime configuration.
+
+---
+
+## Important Terminology Change
+
+Older code and logs still use names such as `subaperture_config`, `FA`, and
+`SA1` because the project originally targeted subaperture reconstruction. In the
+current super-resolution formulation, those names should be interpreted as
+bandwidth levels.
+
+The dataset index mapping is now:
+
+| Logical index | Bandwidth represented | Historical label that may appear in code/logs |
+| --- | ---: | --- |
+| `0` | `100%` | `FA` |
+| `1` | `87.5%` | `SA1` |
+| `2` | `75%` | `SA2` |
+| `3` | `62.5%` | `SA3` |
+| `4` | `50%` | `SA4` |
+
+For example, the active config currently contains:
+
+```yaml
+data:
+  subaperture_config:
+    input_indices: [2]
+    output_indices: [0]
+    active_polarizations: ["VV"]
+```
+
+That means:
+
+```text
+input x  = 75% bandwidth VV complex patch
+target y = 100% bandwidth VV complex patch
+```
+
+If W&B or validation plots label the input as `SA2`, read that label as
+`75% bandwidth`. If the target is labeled `FA`, read it as `100% bandwidth`.
+
+---
+
+## Framework Summary
+
+### Data representation
+
+Each model batch is a pair:
+
+```python
+x, y = batch
+```
+
+Both tensors use shape:
+
+```text
+[B, C, H, W]
+```
+
+where:
+
+- `B` is the batch size.
+- `C` is the number of real-valued channels.
+- `H` and `W` are patch height and width.
+- Complex values are stored as interleaved real/imaginary channels.
+
+For one polarization and one bandwidth level:
+
+```text
+[I, Q] -> 2 channels
+```
+
+For two polarizations and one bandwidth level:
+
+```text
+[I_VV, Q_VV, I_VH, Q_VH] -> 4 channels
+```
+
+For multiple input bandwidth levels, channels are concatenated in the selected
+index order.
+
+### Active safetensor channel layout
+
+`data/patch_generation.py` writes each patch as one tensor named `x` with shape:
+
+```text
+[20, patch_size, patch_size]
+```
+
+The 20 channels are 5 bandwidth levels times 2 polarizations times 2 I/Q
+components.
+
+| Bandwidth index | Bandwidth | Channel block | Channels inside block |
+| --- | ---: | --- | --- |
+| `0` | `100%` | `0:4` | `I_VV, Q_VV, I_VH, Q_VH` |
+| `1` | `87.5%` | `4:8` | `I_VV, Q_VV, I_VH, Q_VH` |
+| `2` | `75%` | `8:12` | `I_VV, Q_VV, I_VH, Q_VH` |
+| `3` | `62.5%` | `12:16` | `I_VV, Q_VV, I_VH, Q_VH` |
+| `4` | `50%` | `16:20` | `I_VV, Q_VV, I_VH, Q_VH` |
+
+`data/finaldataset.py` maps logical bandwidth indices to physical channels with:
+
+```python
+base_offset = bandwidth_index * 4
+```
+
+Then it selects the requested polarizations. The current safetensor dataset
+implementation supports `VV` and `VH`.
+
+### Channel count rules
+
+Use this formula when changing `input_indices`, `output_indices`, or
+`active_polarizations`:
+
+```text
+channels = number_of_bandwidth_indices * number_of_polarizations * 2
+```
+
+Examples:
+
+| Task | Config indices | Polarizations | `model.in_channels` | `model.out_channels` |
+| --- | --- | --- | ---: | ---: |
+| `75% -> 100%` | input `[2]`, output `[0]` | `["VV"]` | `2` | `2` |
+| `50% -> 100%` | input `[4]`, output `[0]` | `["VV"]` | `2` | `2` |
+| `75%, 62.5%, 50% -> 100%` | input `[2, 3, 4]`, output `[0]` | `["VV"]` | `6` | `2` |
+| `75% -> 100%`, dual-pol | input `[2]`, output `[0]` | `["VV", "VH"]` | `4` | `4` |
+| Multi-input, dual-pol | input `[2, 3, 4]`, output `[0]` | `["VV", "VH"]` | `12` | `4` |
+
+For the diffusion model, `model.unet.channels` should normally equal:
+
+```text
+model.in_channels + model.out_channels
+```
+
+because the U-Net receives the noisy target estimate concatenated with the
+condition image.
 
 ---
 
 ## Repository Layout
-- `train.py` — training entrypoint.
-- `evaluate.py` — offline evaluation script for saved checkpoints.
-- `configs/config.yaml` — main runtime configuration.
-- `src/PixelDiffusion.py` — LightningModule and training/validation logic.
-- `data/datamodule.py` — Lightning DataModule.
-- `data/dataset.py` — adapter dataset that selects backend/fallback.
-- `data/finaldataset.py` — SAR dataset implementation used in normal runs.
+
+```text
+.
+|-- README.md
+|-- configs/
+|   `-- config.yaml
+|-- data/
+|   |-- patch_generation.py
+|   |-- datamodule.py
+|   |-- dataset.py
+|   |-- finaldataset.py
+|   |-- sardataset.py
+|   |-- data_cleaning.py
+|   `-- data_inspection.py
+|-- src/
+|   |-- PixelDiffusion.py
+|   |-- DC2SCN.py
+|   |-- EMA.py
+|   |-- callbacks.py
+|   `-- DenoisingDiffusionProcess/
+|-- train.py
+|-- evaluate.py
+|-- requirements.txt
+`-- archive/
+```
+
+Important files:
+
+- `configs/config.yaml`: main configuration file for data, model, trainer,
+  logging, and evaluation.
+- `data/patch_generation.py`: generates the current super-resolution
+  `.safetensors` dataset from H5 SLC inputs.
+- `data/finaldataset.py`: active safetensor SAR dataset backend.
+- `data/dataset.py`: adapter returning only `(x, y)` to Lightning.
+- `data/datamodule.py`: Lightning `DataModule`, including overfit-mode support.
+- `src/PixelDiffusion.py`: conditional diffusion Lightning module, hybrid loss,
+  EMA support, validation metrics, and inverse normalization.
+- `src/DenoisingDiffusionProcess/`: Gaussian forward process, beta schedules,
+  DDPM sampler, DDIM sampler class, and ConvNeXt U-Net backbone.
+- `src/DC2SCN.py`: deterministic baseline model and Lightning wrapper.
+- `src/callbacks.py`: W&B image plots, KDE plots, histograms, and phase plots.
+- `train.py`: builds data, model, callbacks, W&B logger, checkpoints, and trainer.
+- `evaluate.py`: checkpoint evaluation script for IRF, KDE, phase coherence, ENL,
+  and hypothesis-test summaries.
+- `archive/`: older implementation and documentation retained for reference.
+  It is not the active training path.
 
 ---
 
-## Data Interface
-The training/evaluation model expects each batch to be:
-```python
-return x, y 
-```
-with shape `[B, C, H, W]` for both tensors.
-
-In the current SAR pipeline:
-- channels are built from interleaved Real (I) and Imaginary (Q) components,
-- values are normalised using a signed `log1p` transformation scaled by a configurable `global_max` to handle heavy-tailed SAR distributions, 
-- the dataset backend clamps these normalised values into the `[-1, 1]` latent space, 
-- model `input_T` / `output_T` currently map to `[-1, 1]` (no additional remapping).
-
----
-
-## Configuration Notes
-Main config: `configs/config.yaml`.
-Important fields:
-- `data.root_dir`: path to patch dataset root.
-- `data.subaperture_config`:
-  - `input_indices`
-  - `output_indices`
-  - `active_polarizations`
-- `model.in_channels` / `model.out_channels`: must match prepared dataset channels.
-- `model.unet.channels`: typically `in_channels + out_channels` for concatenated conditional diffusion input.
-- `model.loss_fn`: `mse`, `mae`, or `hybrid`.
-- `model.ema.enabled`: enables EMA shadow model + EMA validation metrics.
-- `trainer.checkpointing`: controls saved checkpoints (`save_top_k`, `save_last`, etc.).
-
----
-
-
-## Install Requirements
-
-Use your preferred environment manager and install dependencies from `requirements.txt`:
-
-```bash
-pip install -r requirements.txt
-```
-
-If you do not want W&B, you can still run with offline/disabled mode.
-
----
-
-## Train
-
-```bash
-python3 train.py --config configs/config.yaml
-```
-
-Resume from a checkpoint:
-```bash
-python3 train.py --config configs/config.yaml --resume-from-ckpt checkpoints/last.ckpt
-```
-
-Main config file: [`configs/config.yaml`](/work/code/dif_img_rec/configs/config.yaml)
-
-### Required fields
-
-```yaml
-data:
-  loader:
-    batch_size: 4
-    num_workers: 0
-    pin_memory: false
+    active_polarizations: ["VV"]
 
 model:
-  in_channels: 2
+  in_channels: 6
   out_channels: 2
-  num_timesteps: 1000
-  schedule: linear
-  noise_offset: 0.0
   unet:
-    dim: 48
-    dim_mults: [1, 2, 4, 8]
-    channels: 4
+    channels: 8
     out_dim: 2
 ```
 
-Notes:
-- `unet.channels` should usually be `in_channels + out_channels` for conditional concat input.
-- `unet.out_dim` should match `out_channels`.
-- `noise_offset` adds an optional low-frequency offset term to training noise (set `0.0` to disable).
-- Smaller model: reduce `unet.dim` (for example `48` instead of `64`).
-- Current downsized setup reduces the UNet from about `55M` to about `32M` parameters
-  (mainly by lowering base width via `unet.dim` and using the configured channel sizes).
-
-### Optimization and scheduler
+### Train dual-polarization `75% -> 100%`
 
 ```yaml
-optimization:
-  lr: 0.0001
-  reduce_lr_on_plateau:
-    factor: 0.5
-    patience: 10
+data:
+  subaperture_config:
+    input_indices: [2]
+    output_indices: [0]
+    active_polarizations: ["VV", "VH"]
+
+model:
+  in_channels: 4
+  out_channels: 4
+  unet:
+    channels: 8
+    out_dim: 4
 ```
 
-Scheduler monitors `val_loss`.
-
-### Trainer
+### Switch to DC2SCN baseline
 
 ```yaml
-trainer:
-  max_epochs: 100
-  accelerator: auto
-  devices: 1
-  precision: 32
-  log_every_n_steps: 10
-  enable_checkpointing: true
-  checkpointing:
-    dirpath: checkpoints
-    filename: "{epoch:03d}--{val_loss:.4f}"
-    monitor: val_loss
-    mode: min
-    save_top_k: 3
-    save_last: true
-    every_n_epochs: 1
-    auto_inset_metric_name: false
+model:
+  type: dc2scn
+  in_channels: 2
+  out_channels: 2
+  dc2scn:
+    width: 64
+    num_blocks: 6
+    growth_rate: 32
 ```
+
+`unet` settings are ignored when `model.type: dc2scn`.
 
 ---
 
-## Evaluate a Saved Checkpoint
+## Practical Checklist Before Long Runs
 
-```bash
-python3 evaluate.py \
-  --config config/config.yaml \
-  --checkpoint /path/to/model.ckpt \
-  --split test
+1. Confirm `data.root_dir` exists and contains product directories with
+   `.safetensors` files.
+2. Confirm each generated patch contains a tensor named `x` with 20 channels.
+3. Confirm the bandwidth index mapping:
+
+```text
+0=100%, 1=87.5%, 2=75%, 3=62.5%, 4=50%
 ```
 
-### Reported metrics:
-This script performs an offline radar physics evaluation. The metrics explicitly evaluate structure and phase coherence.
-Spatial metrics:
-- `psf_azimuth_rel_err`: relative 3 dB width error in azimuth.
-- `psf_range_rel_err`: relative 3 dB width error in range.
-- `enl_rel_err`: relative ENL error on intensity.
-- `kde_js_disntance`: Jensen-Shannon distance between KDEs of reconstructed vs target intensity.
-Phase metrics:
-- `rel_phase_mae_rad`: mean absolute wrapped error of relative phase (radians).
-- `rel_phase_coherence`: circular coherence of relative phase errors (1.0 is best).
-
-Optional JSON output:
-```bash
-python3 evaluate.py \
-  --config config/config.yaml \
-  --checkpoint /path/to/model.ckpt \
-  --split test \
-  --output-json reports/sar_eval.json
-```
+4. Confirm `active_polarizations` matches the generated channels and current
+   dataset support.
+5. Recalculate `model.in_channels` and `model.out_channels`.
+6. For diffusion, set `model.unet.channels = in_channels + out_channels`.
+7. Set `model.unet.out_dim = out_channels`.
+8. Confirm `data.global_max` is suitable for the dataset.
+9. Run a small overfit sanity check.
+10. Inspect W&B reconstruction panels and phase/magnitude histograms.
+11. Confirm checkpoint monitor and mode match the metric objective.
 
 ---
-## Logging
-Weights & Biases settings are under `logging.wandb` in config.
 
-Config section:
+## Troubleshooting
+
+### Shape mismatch in the model
+
+Most shape errors come from inconsistent channel counts.
+
+Check:
 
 ```yaml
-logging:
-  wandb:
-    project: dif_img_rec
-    name: null
-    save_dir: logs
-    log_model: false
-    save_config_file: true
-    config_artifact_name: null
+data.subaperture_config.input_indices
+data.subaperture_config.output_indices
+data.subaperture_config.active_polarizations
+model.in_channels
+model.out_channels
+model.unet.channels
+model.unet.out_dim
 ```
 
-When `save_config_file: true`, `train.py` uploads the exact YAML file passed via `--config` to W&B (both as run file and as `config` artifact)
+For diffusion:
 
-### Option A: online logging
+```text
+model.unet.channels = model.in_channels + model.out_channels
+model.unet.out_dim  = model.out_channels
+```
+
+### Reconstruction labels still say `FA` or `SA`
+
+This is expected until the historical labels are renamed in the code. Interpret
+them through the bandwidth mapping table:
+
+```text
+FA  -> index 0 -> 100%
+SA1 -> index 1 -> 87.5%
+SA2 -> index 2 -> 75%
+SA3 -> index 3 -> 62.5%
+SA4 -> index 4 -> 50%
+```
+
+### Validation is slow
+
+Diffusion validation can be expensive because prediction runs a full reverse
+denoising chain. To shorten test runs:
 
 ```bash
-wandb login
-export WANDB_API_KEY=...   # if not already logged in
+python3 train.py --config configs/config.yaml --limit-val-batches 0.1
 ```
 
-### Option B: offline logging
+or lower `trainer.limit_val_batches` in the config.
 
-```bash
-export WANDB_MODE=offline
-```
+### W&B is not desired
 
-### Option C: disable W&B entirely
-
-Set env var before run:
+Use:
 
 ```bash
 export WANDB_DISABLED=true
 ```
 
----
+or:
 
-## Overfit sanity check (same patches in train and validation)
-
-Your PhD colleague's suggestion is a strong diagnostic: intentionally forcing train and validation to use the same tiny patch set helps verify that the model and preprocessing can represent the phase reconstruction task at all.
-
-If this controlled run cannot overfit, the bottleneck is usually implementation/configuration (loss scaling, channel mapping, normalization, model capacity, optimizer setup), not generalization.
-
-### How to enable in this repository
-
-Set the following in `configs/config.yaml`:
-
-```yaml
-data:
-  overfit:
-    enabled: true
-    source_split: train
-    num_patches: 8
+```bash
+export WANDB_MODE=offline
 ```
 
-Behavior:
-- `data/datamodule.py` will create one subset from `source_split` and use that exact subset for both `train_dataloader()` and `val_dataloader()`.
-- Data augmentation is disabled in this mode by design to make memorization diagnostics easier to interpret.
+### Generated values look saturated
 
-### What to expect
+Check `data.global_max`. Saturation usually means the value is too small for
+the dataset. Inspect the physical magnitude distribution and choose a scale that
+compresses outliers without forcing most high-intensity values to `1.0`.
 
-- `train_loss` should drop quickly.
-- Validation reconstruction metrics (PSNR/SSIM/phase-coherence) should also improve strongly because validation sees the same samples.
-- If phase metrics remain poor even in this setup, inspect:
-  - I/Q channel ordering and selected subaperture indices,
-  - normalization/inverse-normalization consistency,
-  - phase-aware loss weighting (`model.loss_fn`, `hybrid_phase_weight`),
-  - diffusion step count and UNet width.
+### Phase metrics are poor even when magnitude improves
+
+Check:
+
+- I/Q order in the generated safetensors.
+- Whether both input and target use the same polarization order.
+- Whether the inverse normalization uses the same `global_max` as training.
+- Hybrid loss phase weight.
+- Whether the task is too underdetermined for the selected input bandwidth.
+
 ---
 
-## Practical Checklist Before Long Training Runs
-
-- Confirm `data.root_dir` exists and contains expected patch structure.
-- Verify `model.in_channels` / `model.out_channels` match generated tensors.
-- Ensure `model.unet.channels == in_channels + out_channels` (unless intentionally different).
-- Run a short sanity run and check validation reconstruction metrics/logged images.
-- Validate checkpoint save path and naming in `trainer.checkpointing`.
