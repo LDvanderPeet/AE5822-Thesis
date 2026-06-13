@@ -2,13 +2,14 @@ import os
 import random
 import numpy as np
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
 from safetensors.torch import load_file
 
 
 
 def tfm_dihedral(x, k):
-    """Strip-safe augmentations. Only allows flips that maintain the rectangular
+    """
+    Strip-safe augmentations. Only allows flips that maintain the rectangular
     aspect ratio and preserve the relationship between Azimuth and Range axes.
     Transpositions and 90/270-degree rotations are excluded as they scramble
     SAR Doppler physics.
@@ -121,7 +122,6 @@ class SafetensorSARDataset(Dataset):
             if n < 20:
                 continue
 
-            # Geographical split indices (70% / 15% / 15%)
             train_end = int(n * 0.70)
             val_start = train_end + buffer_size
             val_end = int(n * 0.85)
@@ -218,9 +218,6 @@ class SafetensorSARDataset(Dataset):
 
 
 if __name__ == "__main__":
-    ## ---- TEST ---- ##
-    ##
-    ## -------------- ##
     def test_loading():
         cfg = {
             "seed": 42,
@@ -230,7 +227,7 @@ if __name__ == "__main__":
                 "global_max": 2.5,
                 "subaperture_config": {
                     "active_polarizations": ["VV", "VH"],
-                    "input_indices": [1, 2, 3],  # SA1, SA2, SA3
+                    "input_indices": [1, 2, 3, 4],  # 87.5%, 75%, 62.5%, 50%
                     "output_indices": [0]  # Full Aperture
                 }
             }
