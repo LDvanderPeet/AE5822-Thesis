@@ -101,6 +101,17 @@ def main() -> None:
                 if total_evaluated_patches == args.tile:
                     print(f">>> Found target tile! Simulating forward process timeline...")
 
+                    c_log = deg_batch[i].unsqueeze(0).float().to(device)
+                    c_phys = model._inverse_signed_log_normalize(c_log)
+
+                    if is_amp_only:
+                        c_mag = c_phys[0].cpu().numpy()
+                    else:
+                        c_mag = np.abs(to_complex_channels(c_phys.cpu())[0].numpy())
+
+                    save_pure_sar_image(scale_for_diagram(c_mag), output_dir, "condition_c.png")
+                    print("    -> Exported: condition_c.png (Subaperture Input)")
+
                     x0_log = ref_batch[i].unsqueeze(0).float().to(device)
                     x0_phys = model._inverse_signed_log_normalize(x0_log)
 

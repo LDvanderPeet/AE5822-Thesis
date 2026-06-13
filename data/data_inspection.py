@@ -44,7 +44,7 @@ def inspect_single_patch(file_path):
 
     mag = np.sqrt(i_comp ** 2 + q_comp ** 2)
     mean_val, std_val = np.mean(mag), np.std(mag)
-    vmax_disp = mean_val + (3 * std_val)  # 3-sigma clipping for visual clarity
+    vmax_disp = mean_val + (3 * std_val)
 
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
 
@@ -83,7 +83,6 @@ def plot_full_original_tile(h5_file_path, downsample_factor=4, group_name="bands
         print(f"File not found: {h5_file_path}")
         return
 
-    print(f"Loading full tile: {os.path.basename(h5_file_path)}...")
 
     with h5py.File(h5_file_path, 'r') as f:
         if group_name not in f:
@@ -111,8 +110,6 @@ def plot_full_original_tile(h5_file_path, downsample_factor=4, group_name="bands
         return
 
     mean_val, std_val = np.mean(active_pixels), np.std(active_pixels)
-    # A 4-sigma clip is standard for full SAR scenes to highlight corner reflectors
-    # while keeping the speckle visible.
     vmax_disp = mean_val + (4 * std_val)
 
     print("Rendering full scene...")
@@ -136,7 +133,7 @@ def plot_full_original_tile(h5_file_path, downsample_factor=4, group_name="bands
 def _process_single_file_stats(path):
     """Helper for parallel processing."""
     try:
-        data = load_file(path)["x"]  # [16, 128, 128]
+        data = load_file(path)["x"]
         sum_x = torch.sum(data, dim=(1, 2)).numpy()
         sum_x2 = torch.sum(data ** 2, dim=(1, 2)).numpy()
         count = data.shape[1] * data.shape[2]
@@ -160,7 +157,6 @@ def compute_dataset_statistics(root_dir, n_jobs=16):
         print("No valid data found.")
         return
 
-    # Aggregate
     total_sum = np.zeros(16)
     total_sum_x2 = np.zeros(16)
     total_count = 0
@@ -183,50 +179,6 @@ def compute_dataset_statistics(root_dir, n_jobs=16):
     for i in range(16):
         print(f"{i:<5} | {mean[i]:.4f} | {std[i]:.4f} | {global_min[i]:.4f} | {global_max[i]:.4f}")
 
-# ==========================================
-# 4. Subaperture linearity test
-# ==========================================
-def test_subaperture_linearity(patch_path):
-    if not os.path.exists(patch_path):
-        print(f"File not found: {patch_path}")
-        return
-
-    print(f"Loading patch: {os.path.basename(patch_path)}")
-
-    # 1. Load the 16-channel tensor
-    data = load_file(patch_path)["x"]
-
-    # 2. Extract the VV channels based on your generation script
-    # Shape of each slice: [2, 128, 128] (I and Q)
-    FA_true = data[0:2, :, :]
-    SA1 = data[4:6, :, :]
-    SA2 = data[8:10, :, :]
-    SA3 = data[12:14, :, :]
-
-    # 3. The Recombination (Element-wise addition)
-    SA_sum = SA1 + SA2 + SA3
-
-    # 4. Calculate the Errors
-    mse_error = F.mse_loss(SA_sum, FA_true)
-    mae_error = F.l1_loss(SA_sum, FA_true)
-
-    # Calculate relative error to give it physical context
-    fa_mean_energy = torch.mean(torch.abs(FA_true))
-    relative_error = mae_error / (fa_mean_energy + 1e-8) * 100
-
-    print("\n--- Linearity Test Results ---")
-    print(f"Mean Squared Error (MSE): {mse_error.item():.8e}")
-    print(f"Mean Absolute Error (MAE): {mae_error.item():.8e}")
-    print(f"Relative Error:            {relative_error.item():.6f}%")
-
-    # 5. The Verdict
-    if mse_error.item() < 1e-5:
-        print("\n✅ SUCCESS: The Fourier linearity holds perfectly.")
-        print("You can safely use element-wise addition in your PyTorch loss function!")
-    else:
-        print("\n❌ WARNING: Severe non-linearity detected.")
-        print("A windowing function or overlapping filters were likely applied during dataset creation.")
-
 
 def detect_polarimetric_reflectors(h5_file_path, min_sigma=7.0, min_scr=15.0, min_pol_ratio=5.0):
     if not os.path.exists(h5_file_path):
@@ -235,11 +187,9 @@ def detect_polarimetric_reflectors(h5_file_path, min_sigma=7.0, min_scr=15.0, mi
     print(f"Loading 1x resolution chunk: {os.path.basename(h5_file_path)}...")
 
     with h5py.File(h5_file_path, 'r') as f:
-        # Load both polarizations
         i_vv = f["bands"]["i_VV"][()].astype(np.float32)
         q_vv = f["bands"]["q_VV"][()].astype(np.float32)
 
-        # Check if VH exists in this file
         has_vh = "i_VH" in f["bands"]
         if has_vh:
             i_vh = f["bands"]["i_VH"][()].astype(np.float32)
@@ -247,14 +197,12 @@ def detect_polarimetric_reflectors(h5_file_path, min_sigma=7.0, min_scr=15.0, mi
         else:
             print("WARNING: No VH polarization found. Skipping polarimetric filter.")
 
-    # Calculate Magnitudes
     mag_vv = np.sqrt(np.square(i_vv) + np.square(q_vv))
     active_pixels = mag_vv[mag_vv > 0]
     if len(active_pixels) == 0: return
 
     mean_vv, std_vv = np.mean(active_pixels), np.std(active_pixels)
 
-    # 1. Spatial Filters (SCR and Peak)
     global_thresh = mean_vv + (min_sigma * std_vv)
     is_bright = mag_vv > global_thresh
     is_peak = maximum_filter(mag_vv, size=5) == mag_vv
@@ -268,14 +216,11 @@ def detect_polarimetric_reflectors(h5_file_path, min_sigma=7.0, min_scr=15.0, mi
     scr_vv = mag_vv / clutter_mean
     spatial_targets = is_bright & is_peak & (scr_vv > min_scr)
 
-    # 2. Polarimetric Filter (VV/VH Ratio)
     if has_vh:
         mag_vh = np.sqrt(np.square(i_vh) + np.square(q_vh))
-        # Prevent division by zero
         mag_vh[mag_vh == 0] = 1e-6
         pol_ratio = mag_vv / mag_vh
 
-        # Combine Spatial AND Polarimetric conditions
         final_targets = spatial_targets & (pol_ratio > min_pol_ratio)
     else:
         final_targets = spatial_targets
@@ -283,7 +228,6 @@ def detect_polarimetric_reflectors(h5_file_path, min_sigma=7.0, min_scr=15.0, mi
     y_coords, x_coords = np.where(final_targets)
     print(f"Filtered down to {len(y_coords)} Polarimetric Corner Reflectors.")
 
-    # Render
     vmax_disp = mean_vv + (4 * std_vv)
     fig, ax = plt.subplots(figsize=(14, 14))
     ax.imshow(np.clip(mag_vv, 0, vmax_disp), cmap='gray')
@@ -310,18 +254,18 @@ if __name__ == "__main__":
     DATASET_ROOT = "/shared/home/lvanderpeet/AE5822-Thesis/dataset_patches_128"
     FULL_TILE_PATH = "/shared/home/lvanderpeet/AE5822-Thesis/dataset/S1C_S6_SLC__1SDV_20250417T084009_20250417T084038_001930_003C95_78FA/299D_1489R.h5"
 
-    # TEST_PATCH = "/shared/home/lvanderpeet/AE5822-Thesis/dataset_patches_128/S1A_S4_SLC__1SDV_20160629T224400_20160629T224425_011932_012621_65C3/512U_564L__2880_512.safetensors"
-    #
-    # test_subaperture_linearity(TEST_PATCH)
+    TEST_PATCH = "/shared/home/lvanderpeet/AE5822-Thesis/dataset_patches_128/S1A_S4_SLC__1SDV_20160629T224400_20160629T224425_011932_012621_65C3/512U_564L__2880_512.safetensors"
+
+    test_subaperture_linearity(TEST_PATCH)
 
     ## 1. ---- Inspect a single patch ----
-    # SAMPLE_PATCH = os.path.join(DATASET_ROOT, "S1A_S4_SLC__1SDV_20160629T224400_20160629T224425_011932_012621_65C3",
-    #                             "512U_564L__2880_512.safetensors")
-    # inspect_single_patch(SAMPLE_PATCH)
+    SAMPLE_PATCH = os.path.join(DATASET_ROOT, "S1A_S4_SLC__1SDV_20160629T224400_20160629T224425_011932_012621_65C3",
+                                "512U_564L__2880_512.safetensors")
+    inspect_single_patch(SAMPLE_PATCH)
 
     ## 2. ---- Reconstruct and Plot a FULL TILE ----
-    # plot_full_original_tile(FULL_TILE_PATH, downsample_factor=1)
+    plot_full_original_tile(FULL_TILE_PATH, downsample_factor=1)
 
     ## 3. ---- Compute Global Statistics (Takes time) ----
-    # compute_dataset_statistics(DATASET_ROOT, n_jobs=16)
+    compute_dataset_statistics(DATASET_ROOT, n_jobs=16)
     detect_polarimetric_reflectors(FULL_TILE_PATH)
