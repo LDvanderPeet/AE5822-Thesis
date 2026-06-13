@@ -22,7 +22,21 @@ from src.DenoisingDiffusionProcess.beta_schedules import get_beta_schedule
 
 
 def save_pure_sar_image(data: np.ndarray, save_dir: Path, filename: str) -> None:
-    """Saves a 2D matrix with absolute zero margin or padding borders."""
+    """
+    Saves a raw SAR matrix slice to disk as a high-density image without plot borders.
+
+    Forces a 1:1 pixel aspect ratio and strips away figure padding, ticks, and
+    axes to ensure clean visual comparisons of speckle patterns and point target structures.
+
+    Parameters
+    ----------
+    data : np.ndarray or torch.Tensor
+        The spatial 2D SAR representation to save (e.g., amplitude map).
+    save_dir : Path
+        Target directory location where the file will be stored.
+    filename : str
+        The designated output file name (e.g., 'iter_01.png').
+    """
     if data.ndim == 3:
         data = data[0]
     if isinstance(data, torch.Tensor):
@@ -41,8 +55,20 @@ def save_pure_sar_image(data: np.ndarray, save_dir: Path, filename: str) -> None
 
 def scale_for_diagram(mag: np.ndarray) -> np.ndarray:
     """
-    Applies a robust quantile cap to handle SAR dynamic range skew,
-    ensuring consistent geometric contrast from t=0 to t=999.
+    Applies percentile-based contrast stretching to map raw values to a clip boundary.
+
+    Robustly clips the input array between its 1st and 99th percentiles to eliminate
+    extreme SAR bright-scatterer outliers and maps the remaining values to $[0.0, 1.0]$.
+
+    Parameters
+    ----------
+    mag : np.ndarray
+        The unscaled, high dynamic range magnitude matrix.
+
+    Returns
+    -------
+    np.ndarray
+        The min-max normalized contrast-stretched image ready for visual display.
     """
     vmin = float(np.percentile(mag, 1))
     vmax = float(np.percentile(mag, 99))
