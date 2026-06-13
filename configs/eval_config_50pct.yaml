@@ -5,7 +5,7 @@ data:
   batch_size: 1
   num_workers: 0
   subaperture_config:
-    input_indices: [2] #TODO: change for different evaluation schemes.
+    input_indices: [4] #TODO: change for different evaluation schemes.
     output_indices: [0]
     active_polarizations: ["VV"]
   split:
@@ -43,7 +43,7 @@ model:
 
 evaluation:
   checkpoint_path: "/shared/home/lvanderpeet/AE5822-Thesis/checkpoints/20260604-1327-diffusion_ASR_50pct/refine-011-0.7034.ckpt"
-  save_dir: "evaluation_results/test_pipeline_mistmatch_75in50pct"
+  save_dir: "evaluation_results/test_pipeline_50pctv2"
   max_eval_patches: 1000
   max_scenes: 5
   tests:

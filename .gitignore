@@ -5,12 +5,12 @@ logs/
 archive/
 checkpoints/
 evaluation_results/
-evaluation_results_kde/
 *.pth
 *.zarr
 *.npy
 *.png
 *.safetensor
+*.pdf
 
 __pycache__/
 .idea/
